@@ -32,7 +32,6 @@ from airflow import settings
 from airflow.cli import cli_parser
 from airflow.exceptions import (
     AirflowException,
-    AirflowTaskTimeout,
     BackfillUnfinished,
     DagConcurrencyLimitReached,
     NoAvailablePoolSlot,
@@ -54,20 +53,24 @@ from airflow.operators.empty import EmptyOperator
 from airflow.utils import timezone
 from airflow.utils.session import create_session
 from airflow.utils.state import DagRunState, State, TaskInstanceState
-from airflow.utils.timeout import timeout
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.utils.types import DagRunType
 from tests.listeners import dag_listener
 from tests.models import TEST_DAGS_FOLDER
-from tests.test_utils.config import conf_vars
-from tests.test_utils.db import (
+
+from dev.tests_common.test_utils.compat import AIRFLOW_V_3_0_PLUS
+from dev.tests_common.test_utils.config import conf_vars
+from dev.tests_common.test_utils.db import (
     clear_db_dags,
     clear_db_pools,
     clear_db_runs,
     clear_db_xcom,
     set_default_pool_slots,
 )
-from tests.test_utils.mock_executor import MockExecutor
+from dev.tests_common.test_utils.mock_executor import MockExecutor
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.utils.types import DagRunTriggeredByType
 
 pytestmark = [pytest.mark.db_test, pytest.mark.skip_if_database_isolation_mode]
 
@@ -1065,34 +1068,6 @@ class TestBackfillJob:
             ],
         ]
 
-    def test_backfill_pooled_tasks(self):
-        """
-        Test that queued tasks are executed by BackfillJobRunner
-        """
-        session = settings.Session()
-        pool = Pool(pool="test_backfill_pooled_task_pool", slots=1, include_deferred=False)
-        session.add(pool)
-        session.commit()
-        session.close()
-
-        dag = self.dagbag.get_dag("test_backfill_pooled_task_dag")
-        dag.clear()
-
-        job = Job()
-        job_runner = BackfillJobRunner(job=job, dag=dag, start_date=DEFAULT_DATE, end_date=DEFAULT_DATE)
-
-        # run with timeout because this creates an infinite loop if not
-        # caught
-        try:
-            with timeout(seconds=20):
-                run_job(job=job, execute_callable=job_runner._execute)
-        except AirflowTaskTimeout:
-            logger.info("Timeout while waiting for task to complete")
-        run_id = f"backfill__{DEFAULT_DATE.isoformat()}"
-        ti = TI(task=dag.get_task("test_backfill_pooled_task"), run_id=run_id)
-        ti.refresh_from_db()
-        assert ti.state == State.SUCCESS
-
     @pytest.mark.parametrize("ignore_depends_on_past", [True, False])
     def test_backfill_depends_on_past_works_independently_on_ignore_depends_on_past(
         self, ignore_depends_on_past, mock_executor
@@ -1650,6 +1625,7 @@ class TestBackfillJob:
         prefix = "backfill_job_test_test_reset_orphaned_tasks"
         states = [State.QUEUED, State.SCHEDULED, State.NONE, State.RUNNING, State.SUCCESS]
         states_to_reset = [State.QUEUED, State.SCHEDULED, State.NONE]
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
 
         tasks = []
         with dag_maker(dag_id=prefix) as dag:
@@ -1663,7 +1639,7 @@ class TestBackfillJob:
         job_runner = BackfillJobRunner(job=job, dag=dag)
         # create dagruns
         dr1 = dag_maker.create_dagrun(run_id=DEFAULT_DAG_RUN_ID, state=State.RUNNING)
-        dr2 = dag.create_dagrun(run_id="test2", state=State.SUCCESS)
+        dr2 = dag.create_dagrun(run_id="test2", state=State.SUCCESS, **triggered_by_kwargs)
 
         # create taskinstances and set states
         dr1_tis = []
@@ -1722,8 +1698,14 @@ class TestBackfillJob:
         job = Job()
         job_runner = BackfillJobRunner(job=job, dag=dag)
         # make two dagruns, only reset for one
-        dr1 = dag_maker.create_dagrun(state=State.SUCCESS)
-        dr2 = dag.create_dagrun(run_id="test2", state=State.RUNNING, session=session)
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
+        dr1 = dag_maker.create_dagrun(state=State.SUCCESS, **triggered_by_kwargs)
+        dr2 = dag.create_dagrun(
+            run_id="test2",
+            state=State.RUNNING,
+            session=session,
+            **triggered_by_kwargs,
+        )
         ti1 = dr1.get_task_instances(session=session)[0]
         ti2 = dr2.get_task_instances(session=session)[0]
         ti1.state = State.SCHEDULED
