@@ -166,6 +166,15 @@ ARG_SUBDIR = Arg(
     ),
     default="[AIRFLOW_HOME]/dags" if BUILD_DOCS else settings.DAGS_FOLDER,
 )
+ARG_BUNDLE_NAME = Arg(
+    (
+        "-B",
+        "--bundle-name",
+    ),
+    help=("The name of the DAG bundle to use; may be provided more than once"),
+    default=None,
+    action="append",
+)
 ARG_START_DATE = Arg(("-s", "--start-date"), help="Override start_date YYYY-MM-DD", type=parsedate)
 ARG_END_DATE = Arg(("-e", "--end-date"), help="Override end_date YYYY-MM-DD", type=parsedate)
 ARG_OUTPUT_PATH = Arg(
@@ -850,6 +859,7 @@ ARG_OPTION = Arg(
     help="The option name",
 )
 
+# lint
 ARG_LINT_CONFIG_SECTION = Arg(
     ("--section",),
     help="The section name(s) to lint in the airflow config.",
@@ -1064,7 +1074,7 @@ DAGS_COMMANDS = (
         name="state",
         help="Get the status of a dag run",
         func=lazy_load_command("airflow.cli.commands.remote_commands.dag_command.dag_state"),
-        args=(ARG_DAG_ID, ARG_LOGICAL_DATE, ARG_SUBDIR, ARG_VERBOSE),
+        args=(ARG_DAG_ID, ARG_LOGICAL_DATE_OR_RUN_ID, ARG_SUBDIR, ARG_VERBOSE),
     ),
     ActionCommand(
         name="next-execution",
@@ -1085,7 +1095,7 @@ DAGS_COMMANDS = (
             "treating the `--dag-id` as a regex pattern."
         ),
         func=lazy_load_command("airflow.cli.commands.remote_commands.dag_command.dag_pause"),
-        args=(ARG_DAG_ID, ARG_SUBDIR, ARG_TREAT_DAG_ID_AS_REGEX, ARG_YES, ARG_OUTPUT, ARG_VERBOSE),
+        args=(ARG_DAG_ID, ARG_TREAT_DAG_ID_AS_REGEX, ARG_YES, ARG_OUTPUT, ARG_VERBOSE),
     ),
     ActionCommand(
         name="unpause",
@@ -1096,7 +1106,7 @@ DAGS_COMMANDS = (
             "treating the `--dag-id` as a regex pattern."
         ),
         func=lazy_load_command("airflow.cli.commands.remote_commands.dag_command.dag_unpause"),
-        args=(ARG_DAG_ID, ARG_SUBDIR, ARG_TREAT_DAG_ID_AS_REGEX, ARG_YES, ARG_OUTPUT, ARG_VERBOSE),
+        args=(ARG_DAG_ID, ARG_TREAT_DAG_ID_AS_REGEX, ARG_YES, ARG_OUTPUT, ARG_VERBOSE),
     ),
     ActionCommand(
         name="trigger",
@@ -1225,7 +1235,7 @@ DAGS_COMMANDS = (
         ),
         func=lazy_load_command("airflow.cli.commands.remote_commands.dag_command.dag_reserialize"),
         args=(
-            ARG_SUBDIR,
+            ARG_BUNDLE_NAME,
             ARG_VERBOSE,
         ),
     ),
@@ -1893,7 +1903,6 @@ core_commands: list[CLICommand] = [
         help="Start a scheduler instance",
         func=lazy_load_command("airflow.cli.commands.local_commands.scheduler_command.scheduler"),
         args=(
-            ARG_SUBDIR,
             ARG_NUM_RUNS,
             ARG_PID,
             ARG_DAEMON,
@@ -1934,7 +1943,7 @@ core_commands: list[CLICommand] = [
         args=(
             ARG_PID,
             ARG_DAEMON,
-            ARG_SUBDIR,
+            ARG_BUNDLE_NAME,
             ARG_NUM_RUNS,
             ARG_STDOUT,
             ARG_STDERR,

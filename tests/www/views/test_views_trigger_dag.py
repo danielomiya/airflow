@@ -25,15 +25,17 @@ from urllib.parse import quote
 import pytest
 
 from airflow.models import DagBag, DagRun
-from airflow.models.param import Param
-from airflow.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk.definitions.param import Param
 from airflow.security import permissions
 from airflow.utils import timezone
 from airflow.utils.json import WebEncoder
 from airflow.utils.session import create_session
 from airflow.utils.types import DagRunType
+from providers.fab.tests.provider_tests.fab.auth_manager.api_endpoints.api_connexion_utils import (
+    create_test_client,
+)
 
-from providers.tests.fab.auth_manager.api_endpoints.api_connexion_utils import create_test_client
 from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.www import check_content_in_response
 
@@ -176,6 +178,18 @@ def test_trigger_dag_logical_date_data_interval(admin_client):
     today_midnight = exec_date.replace(hour=0, minute=0, second=0, microsecond=0)
     assert run.data_interval_start == (today_midnight - datetime.timedelta(days=1))
     assert run.data_interval_end == today_midnight
+
+
+def test_trigger_dag_logical_date_as_none(admin_client):
+    test_dag_id = "example_bash_operator"
+
+    admin_client.post(f"dags/{test_dag_id}/trigger", data={"conf": "{}"})
+
+    with create_session() as session:
+        run = session.query(DagRun).filter(DagRun.dag_id == test_dag_id).first()
+    assert run is not None
+    assert DagRunType.MANUAL in run.run_id
+    assert run.run_type == DagRunType.MANUAL
 
 
 def test_trigger_dag_form(admin_client):

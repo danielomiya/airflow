@@ -28,6 +28,7 @@ from airflow.api_fastapi.core_api.app import (
     init_dag_bag,
     init_error_handlers,
     init_flask_plugins,
+    init_middlewares,
     init_plugins,
     init_views,
 )
@@ -74,9 +75,11 @@ def create_app(apps: str = "all") -> FastAPI:
         init_auth_manager(app)
         init_flask_plugins(app)
         init_error_handlers(app)
+        init_middlewares(app)
 
     if "execution" in apps_list or "all" in apps_list:
         task_exec_api_app = create_task_execution_api_app(app)
+        init_error_handlers(task_exec_api_app)
         app.mount("/execution", task_exec_api_app)
 
     init_config(app)
@@ -130,6 +133,7 @@ def init_auth_manager(app: FastAPI | None = None) -> BaseAuthManager:
 
     if app and (auth_manager_fastapi_app := am.get_fastapi_app()):
         app.mount("/auth", auth_manager_fastapi_app)
+        app.state.auth_manager = am
 
     return am
 

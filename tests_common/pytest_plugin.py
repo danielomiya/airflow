@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from airflow.models.dag import DAG, ScheduleArg
     from airflow.models.dagrun import DagRun, DagRunType
     from airflow.models.taskinstance import TaskInstance
-    from airflow.operators.empty import EmptyOperator
+    from airflow.providers.standard.operators.empty import EmptyOperator
     from airflow.timetables.base import DataInterval
     from airflow.typing_compat import Self
     from airflow.utils.state import DagRunState, TaskInstanceState
@@ -413,6 +413,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "external_python_operator: external python operator tests are 'long', we should run them separately",
     )
     config.addinivalue_line("markers", "enable_redact: do not mock redact secret masker")
+    config.addinivalue_line("markers", "mock_plugin_manager: mark a test to use mock_plugin_manager")
 
     os.environ["_AIRFLOW__SKIP_DATABASE_EXECUTOR_COMPATIBILITY_CHECK"] = "1"
 
@@ -544,8 +545,7 @@ def skip_db_test(item):
         # also automatically skip tests marked with `backend` marker as they are implicitly
         # db tests
         pytest.skip(
-            f"The test is skipped as it is DB test "
-            f"and --skip-db-tests is flag is passed to pytest. {item}"
+            f"The test is skipped as it is DB test and --skip-db-tests is flag is passed to pytest. {item}"
         )
 
 
@@ -784,9 +784,16 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
             self.dagbag = DagBag(os.devnull, include_examples=False, read_dags_from_db=False)
 
         def __enter__(self):
+            self.serialized_model = None
+
             self.dag.__enter__()
             if self.want_serialized:
-                return lazy_object_proxy.Proxy(self._serialized_dag)
+
+                class DAGProxy(lazy_object_proxy.Proxy):
+                    # Make `@dag.task` decorator work when need_serialized_dag marker is set
+                    task = self.dag.task
+
+                return DAGProxy(self._serialized_dag)
             return self.dag
 
         def _serialized_dag(self):
@@ -832,7 +839,10 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
                 return
 
             dag.clear(session=self.session)
-            dag.sync_to_db(session=self.session)
+            if AIRFLOW_V_3_0_PLUS:
+                dag.bulk_write_to_db(self.bundle_name, None, [dag], session=self.session)
+            else:
+                dag.sync_to_db(session=self.session)
 
             if dag.access_control:
                 from airflow.www.security_appless import ApplessAirflowSecurityManager
@@ -851,6 +861,8 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
 
                     dagv = DagVersion.write_dag(
                         dag_id=dag.dag_id,
+                        bundle_name=self.dag_model.bundle_name,
+                        bundle_version=self.dag_model.bundle_version,
                         session=self.session,
                     )
                     self.session.add(dagv)
@@ -861,6 +873,10 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
                     if self.want_activate_assets:
                         self._activate_assets()
                 if sdm:
+                    sdm._SerializedDagModel__data_cache = (
+                        self.serialized_model._SerializedDagModel__data_cache
+                    )
+                    sdm._data = self.serialized_model._data
                     self.serialized_model = sdm
                 else:
                     self.session.merge(self.serialized_model)
@@ -874,10 +890,12 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
         def create_dagrun(self, *, logical_date=None, **kwargs):
             from airflow.utils import timezone
             from airflow.utils.state import DagRunState
-            from airflow.utils.types import DagRunType
+            from airflow.utils.types import NOTSET, DagRunType
 
             if AIRFLOW_V_3_0_PLUS:
                 from airflow.utils.types import DagRunTriggeredByType
+            else:
+                DagRunType.ASSET_TRIGGERED = DagRunType.DATASET_TRIGGERED
 
             if "execution_date" in kwargs:
                 raise TypeError("use logical_date instead")
@@ -889,38 +907,66 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
                 "session": self.session,
                 **kwargs,
             }
-            # Need to provide run_id if the user does not either provide one
-            # explicitly, or pass run_type for inference in dag.create_dagrun().
-            if "run_id" not in kwargs and "run_type" not in kwargs:
-                kwargs["run_id"] = "test"
 
-            if "run_type" not in kwargs:
-                kwargs["run_type"] = DagRunType.from_run_id(kwargs["run_id"])
+            run_type = kwargs.get("run_type", DagRunType.MANUAL)
+            if not isinstance(run_type, DagRunType):
+                run_type = DagRunType(run_type)
 
-            if logical_date is None:
-                if kwargs["run_type"] == DagRunType.MANUAL:
+            if logical_date is NOTSET:
+                # Explicit non requested
+                logical_date = None
+            elif logical_date is None:
+                if run_type == DagRunType.MANUAL:
                     logical_date = self.start_date
                 else:
                     logical_date = dag.next_dagrun_info(None).logical_date
             logical_date = timezone.coerce_datetime(logical_date)
 
-            if "data_interval" not in kwargs:
-                if kwargs["run_type"] == DagRunType.MANUAL:
-                    data_interval = dag.timetable.infer_manual_data_interval(run_after=logical_date)
+            data_interval = None
+            try:
+                data_interval = kwargs["data_interval"]
+            except KeyError:
+                if logical_date is not None:
+                    if run_type == DagRunType.MANUAL:
+                        data_interval = dag.timetable.infer_manual_data_interval(run_after=logical_date)
+                    else:
+                        data_interval = dag.infer_automated_data_interval(logical_date)
+            kwargs["data_interval"] = data_interval
+
+            if "run_id" not in kwargs:
+                if "run_type" not in kwargs:
+                    kwargs["run_id"] = "test"
                 else:
-                    data_interval = dag.infer_automated_data_interval(logical_date)
-                kwargs["data_interval"] = data_interval
+                    if AIRFLOW_V_3_0_PLUS:
+                        kwargs["run_id"] = dag.timetable.generate_run_id(
+                            run_type=run_type,
+                            run_after=logical_date or timezone.coerce_datetime(timezone.utcnow()),
+                            data_interval=data_interval,
+                        )
+                    else:
+                        kwargs["run_id"] = dag.timetable.generate_run_id(
+                            run_type=run_type,
+                            logical_date=logical_date or timezone.coerce_datetime(timezone.utcnow()),
+                            data_interval=data_interval,
+                        )
+            kwargs["run_type"] = run_type
 
             if AIRFLOW_V_3_0_PLUS:
                 kwargs.setdefault("triggered_by", DagRunTriggeredByType.TEST)
                 kwargs["logical_date"] = logical_date
+                kwargs.setdefault("dag_version", None)
+                kwargs.setdefault("run_after", data_interval[-1] if data_interval else timezone.utcnow())
             else:
+                kwargs.pop("dag_version", None)
                 kwargs.pop("triggered_by", None)
                 kwargs["execution_date"] = logical_date
 
+            if self.want_serialized:
+                dag = self.serialized_model.dag
             self.dag_run = dag.create_dagrun(**kwargs)
             for ti in self.dag_run.task_instances:
-                ti.refresh_from_task(dag.get_task(ti.task_id))
+                # This need to always operate on the _real_ dag
+                ti.refresh_from_task(self.dag.get_task(ti.task_id))
             if self.want_serialized:
                 self.session.commit()
             return self.dag_run
@@ -935,6 +981,16 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
                 **kwargs,
             )
 
+        def sync_dagbag_to_db(self):
+            if not AIRFLOW_V_3_0_PLUS:
+                self.dagbag.sync_to_db()
+                return
+
+            self.dagbag.sync_to_db(
+                self.bundle_name,
+                None,
+            )
+
         def __call__(
             self,
             dag_id="test_dag",
@@ -942,6 +998,8 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
             serialized=want_serialized,
             activate_assets=want_activate_assets,
             fileloc=None,
+            relative_fileloc=None,
+            bundle_name=None,
             session=None,
             **kwargs,
         ):
@@ -971,8 +1029,20 @@ def dag_maker(request) -> Generator[DagMaker, None, None]:
             # other scheduling arguments are set.
             self.dag = DAG(dag_id, schedule=schedule, **self.kwargs)
             self.dag.fileloc = fileloc or request.module.__file__
+            if AIRFLOW_V_3_0_PLUS:
+                self.dag.relative_fileloc = relative_fileloc or Path(request.module.__file__).name
             self.want_serialized = serialized
             self.want_activate_assets = activate_assets
+            self.bundle_name = bundle_name or "dag_maker"
+            if AIRFLOW_V_3_0_PLUS:
+                from airflow.models.dagbundle import DagBundleModel
+
+                if (
+                    self.session.query(DagBundleModel).filter(DagBundleModel.name == self.bundle_name).count()
+                    == 0
+                ):
+                    self.session.add(DagBundleModel(name=self.bundle_name))
+                    self.session.commit()
 
             return self
 
@@ -1082,7 +1152,7 @@ def create_dummy_dag(dag_maker: DagMaker) -> CreateDummyDAG:
 
     You cannot be able to alter the created DagRun or DagModel, use `dag_maker` fixture instead.
     """
-    from airflow.operators.empty import EmptyOperator
+    from airflow.providers.standard.operators.empty import EmptyOperator
     from airflow.utils.types import DagRunType
 
     def create_dag(
@@ -1164,10 +1234,14 @@ def create_task_instance(dag_maker: DagMaker, create_dummy_dag: CreateDummyDAG) 
 
     Uses ``create_dummy_dag`` to create the dag structure.
     """
-    from airflow.operators.empty import EmptyOperator
+    from airflow.providers.standard.operators.empty import EmptyOperator
+    from airflow.utils.types import NOTSET, ArgNotSet
+
+    from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
     def maker(
-        logical_date=None,
+        logical_date: datetime | None | ArgNotSet = NOTSET,
+        run_after=None,
         dagrun_state=None,
         state=None,
         run_id=None,
@@ -1193,7 +1267,12 @@ def create_task_instance(dag_maker: DagMaker, create_dummy_dag: CreateDummyDAG) 
         last_heartbeat_at=None,
         **kwargs,
     ) -> TaskInstance:
-        if logical_date is None:
+        if run_after is None:
+            from airflow.utils import timezone
+
+            run_after = timezone.utcnow()
+        if logical_date is NOTSET:
+            # For now: default to having a logical date if None is not explicitly passed.
             from airflow.utils import timezone
 
             logical_date = timezone.utcnow()
@@ -1214,10 +1293,17 @@ def create_task_instance(dag_maker: DagMaker, create_dummy_dag: CreateDummyDAG) 
                 trigger_rule=trigger_rule,
                 **op_kwargs,
             )
-        dagrun_kwargs = {
-            "logical_date": logical_date,
-            "state": dagrun_state,
-        }
+        if AIRFLOW_V_3_0_PLUS:
+            dagrun_kwargs = {
+                "logical_date": logical_date,
+                "run_after": run_after,
+                "state": dagrun_state,
+            }
+        else:
+            dagrun_kwargs = {
+                "logical_date": logical_date if logical_date not in (None, NOTSET) else run_after,
+                "state": dagrun_state,
+            }
         if run_id is not None:
             dagrun_kwargs["run_id"] = run_id
         if run_type is not None:
@@ -1324,15 +1410,27 @@ def session():
 @pytest.fixture
 def get_test_dag():
     def _get(dag_id: str):
+        from airflow import settings
         from airflow.models.dagbag import DagBag
         from airflow.models.serialized_dag import SerializedDagModel
+
+        from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
         dag_file = AIRFLOW_TESTS_DIR / "dags" / f"{dag_id}.py"
         dagbag = DagBag(dag_folder=dag_file, include_examples=False)
 
         dag = dagbag.get_dag(dag_id)
-        dag.sync_to_db()
-        SerializedDagModel.write_dag(dag)
+        if AIRFLOW_V_3_0_PLUS:
+            session = settings.Session()
+            from airflow.models.dagbundle import DagBundleModel
+
+            if session.query(DagBundleModel).filter(DagBundleModel.name == "testing").count() == 0:
+                session.add(DagBundleModel(name="testing"))
+                session.commit()
+            dag.bulk_write_to_db("testing", None, [dag])
+        else:
+            dag.sync_to_db()
+        SerializedDagModel.write_dag(dag, bundle_name="testing")
 
         return dag
 
@@ -1487,13 +1585,21 @@ def _disable_redact(request: pytest.FixtureRequest, mocker):
     """Disable redacted text in tests, except specific."""
     from airflow import settings
 
+    from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
     if next(request.node.iter_markers("enable_redact"), None):
         with pytest.MonkeyPatch.context() as mp_ctx:
             mp_ctx.setattr(settings, "MASK_SECRETS_IN_LOGS", True)
             yield
         return
 
-    mocked_redact = mocker.patch("airflow.utils.log.secrets_masker.SecretsMasker.redact")
+    target = (
+        "airflow.sdk.execution_time.secrets_masker.SecretsMasker.redact"
+        if AIRFLOW_V_3_0_PLUS
+        else "airflow.utils.log.secrets_masker.SecretsMasker.redact"
+    )
+
+    mocked_redact = mocker.patch(target)
     mocked_redact.side_effect = lambda item, name=None, max_depth=None: item
     with pytest.MonkeyPatch.context() as mp_ctx:
         mp_ctx.setattr(settings, "MASK_SECRETS_IN_LOGS", False)
@@ -1501,11 +1607,23 @@ def _disable_redact(request: pytest.FixtureRequest, mocker):
     return
 
 
+@pytest.fixture(autouse=True)
+def _mock_plugins(request: pytest.FixtureRequest):
+    """Disable redacted text in tests, except specific."""
+    if mark := next(request.node.iter_markers("mock_plugin_manager"), None):
+        from tests_common.test_utils.mock_plugins import mock_plugin_manager
+
+        with mock_plugin_manager(**mark.kwargs):
+            yield
+            return
+    yield
+
+
 @pytest.fixture
 def providers_src_folder() -> Path:
     import airflow.providers
 
-    return Path(airflow.providers.__path__[0]).parents[1]
+    return Path(airflow.providers.__path__[0]).parents[2]
 
 
 @pytest.fixture
@@ -1528,6 +1646,19 @@ def clean_dags_and_dagruns():
     yield  # Test runs here
     clear_db_dags()
     clear_db_runs()
+
+
+@pytest.fixture
+def clean_executor_loader():
+    """Clean the executor_loader state, as it stores global variables in the module, causing side effects for some tests."""
+    from airflow.executors.executor_loader import ExecutorLoader
+
+    from tests_common.test_utils.executor_loader import clean_executor_loader_module
+
+    clean_executor_loader_module()
+    yield  # Test runs here
+    clean_executor_loader_module()
+    ExecutorLoader.init_executors()
 
 
 @pytest.fixture(scope="session")
@@ -1559,3 +1690,25 @@ def url_safe_serializer(secret_key) -> URLSafeSerializer:
     from itsdangerous import URLSafeSerializer
 
     return URLSafeSerializer(secret_key)
+
+
+@pytest.fixture
+def create_db_api_hook(request):
+    from unittest.mock import MagicMock
+
+    from sqlalchemy.engine import Inspector
+
+    from airflow.providers.common.sql.hooks.sql import DbApiHook
+
+    columns, primary_keys, reserved_words, escape_column_names = request.param
+
+    inspector = MagicMock(spec=Inspector)
+    inspector.get_columns.side_effect = lambda table_name, schema: columns
+
+    test_db_hook = MagicMock(placeholder="?", inspector=inspector, spec=DbApiHook)
+    test_db_hook.run.side_effect = lambda *args: primary_keys
+    test_db_hook.reserved_words = reserved_words
+    test_db_hook.escape_word_format = "[{}]"
+    test_db_hook.escape_column_names = escape_column_names or False
+
+    return test_db_hook

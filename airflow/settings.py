@@ -328,7 +328,7 @@ def _is_sqlite_db_path_relative(sqla_conn_str: str) -> bool:
 
 def configure_orm(disable_connection_pool=False, pool_class=None):
     """Configure ORM using SQLAlchemy."""
-    from airflow.utils.log.secrets_masker import mask_secret
+    from airflow.sdk.execution_time.secrets_masker import mask_secret
 
     if _is_sqlite_db_path_relative(SQL_ALCHEMY_CONN):
         from airflow.exceptions import AirflowConfigException
@@ -652,13 +652,6 @@ def initialize():
     atexit.register(dispose_orm)
 
 
-def is_usage_data_collection_enabled() -> bool:
-    """Check if data collection is enabled."""
-    return conf.getboolean("usage_data_collection", "enabled", fallback=True) and (
-        os.getenv("SCARF_ANALYTICS", "").strip().lower() != "false"
-    )
-
-
 # Const stuff
 
 KILOBYTE = 1024
@@ -683,8 +676,6 @@ EXECUTE_TASKS_NEW_PYTHON_INTERPRETER = not CAN_FORK or conf.getboolean(
     "execute_tasks_new_python_interpreter",
     fallback=False,
 )
-
-ALLOW_FUTURE_LOGICAL_DATES = conf.getboolean("scheduler", "allow_trigger_in_future", fallback=False)
 
 USE_JOB_SCHEDULE = conf.getboolean("scheduler", "use_job_schedule", fallback=True)
 

@@ -61,25 +61,35 @@ from airflow.sdk.api.datamodels._generated import (
     VariableResponse,
 )
 from airflow.sdk.execution_time.comms import (
+    AssetResult,
     ConnectionResult,
     DeferTask,
+    GetAssetByName,
+    GetAssetByUri,
     GetConnection,
+    GetPrevSuccessfulDagRun,
     GetVariable,
     GetXCom,
+    GetXComCount,
+    PrevSuccessfulDagRunResult,
     PutVariable,
     RescheduleTask,
+    RuntimeCheckOnTask,
     SetRenderedFields,
     SetXCom,
     StartupDetails,
+    SucceedTask,
     TaskState,
     ToSupervisor,
     VariableResult,
+    XComCountResponse,
     XComResult,
 )
 
 if TYPE_CHECKING:
     from structlog.typing import FilteringBoundLogger, WrappedLogger
 
+    from airflow.executors.workloads import BundleInfo
     from airflow.typing_compat import Self
 
 
@@ -98,7 +108,11 @@ MAX_FAILED_HEARTBEATS: int = 3
 # These are the task instance states that require some additional information to transition into.
 # "Directly" here means that the PATCH API calls to transition into these states are
 # made from _handle_request() itself and don't have to come all the way to wait().
-STATES_SENT_DIRECTLY = [IntermediateTIState.DEFERRED, IntermediateTIState.UP_FOR_RESCHEDULE]
+STATES_SENT_DIRECTLY = [
+    IntermediateTIState.DEFERRED,
+    IntermediateTIState.UP_FOR_RESCHEDULE,
+    TerminalTIState.SUCCESS,
+]
 
 
 @overload
@@ -154,38 +168,27 @@ def _configure_logs_over_json_channel(log_fd: int):
     from airflow.sdk.log import configure_logging
 
     log_io = os.fdopen(log_fd, "wb", buffering=0)
-    configure_logging(enable_pretty_log=False, output=log_io)
+    configure_logging(enable_pretty_log=False, output=log_io, sending_to_supervisor=True)
 
 
 def _reopen_std_io_handles(child_stdin, child_stdout, child_stderr):
-    if "PYTEST_CURRENT_TEST" in os.environ:
-        # When we are running in pytest, it's output capturing messes us up. This works around it
-        sys.stdout = sys.__stdout__
-        sys.stderr = sys.__stderr__
-
     # Ensure that sys.stdout et al (and the underlying filehandles for C libraries etc) are connected to the
     # pipes from the supervisor
 
-    for handle_name, sock, mode in (
-        ("stdin", child_stdin, "r"),
-        ("stdout", child_stdout, "w"),
-        ("stderr", child_stderr, "w"),
+    for handle_name, fd, sock, mode in (
+        ("stdin", 0, child_stdin, "r"),
+        ("stdout", 1, child_stdout, "w"),
+        ("stderr", 2, child_stderr, "w"),
     ):
         handle = getattr(sys, handle_name)
-        try:
-            fd = handle.fileno()
-            os.dup2(sock.fileno(), fd)
-            # dup2 creates another open copy of the fd, we can close the "socket" copy of it.
-            sock.close()
-        except io.UnsupportedOperation:
-            if "PYTEST_CURRENT_TEST" in os.environ:
-                # When we're running under pytest, the stdin is not a real filehandle with an fd, so we need
-                # to handle that differently
-                fd = sock.fileno()
-            else:
-                raise
-        # We can't open text mode fully unbuffered (python throws an exception if we try), but we can make it line buffered with `buffering=1`
-        handle = os.fdopen(fd, mode, buffering=1)
+        handle.close()
+        os.dup2(sock.fileno(), fd)
+        del sock
+
+        # We open the socket/fd as binary, and then pass it to a TextIOWrapper so that it looks more like a
+        # normal sys.stdout etc.
+        binary = os.fdopen(fd, mode + "b")
+        handle = io.TextIOWrapper(binary, line_buffering=True)
         setattr(sys, handle_name, handle)
 
 
@@ -286,16 +289,28 @@ def _fork_main(
 
 @attrs.define(kw_only=True)
 class WatchedSubprocess:
+    """
+    Base class for managing subprocesses in Airflow's TaskSDK.
+
+    This class handles common functionalities required for subprocess management, such as
+    socket handling, process monitoring, and request handling.
+    """
+
     id: UUID
 
     pid: int
+    """The process ID of the child process"""
+
     stdin: BinaryIO
     """The handle connected to stdin of the child process"""
 
     decoder: TypeAdapter
+    """The decoder to use for incoming messages from the child process."""
 
     _process: psutil.Process
     _requests_fd: int
+    """File descriptor for request handling."""
+
     _num_open_sockets: int = 4
     _exit_code: int | None = attrs.field(default=None, init=False)
 
@@ -304,11 +319,12 @@ class WatchedSubprocess:
     @classmethod
     def start(
         cls,
+        *,
         target: Callable[[], None] = _subprocess_main,
         logger: FilteringBoundLogger | None = None,
         **constructor_kwargs,
     ) -> Self:
-        """Fork and start a new subprocess to execute the given task."""
+        """Fork and start a new subprocess with the specified target function."""
         # Create socketpairs/"pipes" to connect to the stdin and out from the subprocess
         child_stdin, feed_stdin = mkpipe(remote_read=True)
         child_stdout, read_stdout = mkpipe()
@@ -327,8 +343,19 @@ class WatchedSubprocess:
             del constructor_kwargs
             del logger
 
-            # Run the child entrypoint
-            _fork_main(child_stdin, child_stdout, child_stderr, child_logs.fileno(), target)
+            try:
+                # Run the child entrypoint
+                _fork_main(child_stdin, child_stdout, child_stderr, child_logs.fileno(), target)
+            except BaseException as e:
+                try:
+                    # We can't use log here, as if we except out of _fork_main something _weird_ went on.
+                    print("Exception in _fork_main, exiting with code 124", e, file=sys.stderr)
+                except BaseException as e:
+                    pass
+
+            # It's really super super important we never exit this block. We are in the forked child, and if we
+            # do then _THINGS GET WEIRD_.. (Normally `_fork_main` itself will `_exit()` so we never get here)
+            os._exit(124)
 
         requests_fd = child_comms.fileno()
 
@@ -538,6 +565,7 @@ class WatchedSubprocess:
 @attrs.define(kw_only=True)
 class ActivitySubprocess(WatchedSubprocess):
     client: Client
+    """The HTTP client to use for communication with the API server."""
 
     _terminal_state: str | None = attrs.field(default=None, init=False)
     _final_state: str | None = attrs.field(default=None, init=False)
@@ -561,25 +589,29 @@ class ActivitySubprocess(WatchedSubprocess):
     @classmethod
     def start(  # type: ignore[override]
         cls,
-        path: str | os.PathLike[str],
+        *,
         what: TaskInstance,
+        dag_rel_path: str | os.PathLike[str],
+        bundle_info,
         client: Client,
         target: Callable[[], None] = _subprocess_main,
         logger: FilteringBoundLogger | None = None,
         **kwargs,
     ) -> Self:
-        proc = super().start(id=what.id, client=client, target=target, logger=logger, **kwargs)
+        """Fork and start a new subprocess to execute the given task."""
+        proc: Self = super().start(id=what.id, client=client, target=target, logger=logger, **kwargs)
         # Tell the task process what it needs to do!
-        proc._on_child_started(what, path)
+        proc._on_child_started(ti=what, dag_rel_path=dag_rel_path, bundle_info=bundle_info)
         return proc
 
-    def _on_child_started(self, ti: TaskInstance, path: str | os.PathLike[str]):
+    def _on_child_started(self, ti: TaskInstance, dag_rel_path: str | os.PathLike[str], bundle_info):
         """Send startup message to the subprocess."""
+        start_date = datetime.now(tz=timezone.utc)
         try:
             # We've forked, but the task won't start doing anything until we send it the StartupDetails
             # message. But before we do that, we need to tell the server it's started (so it has the chance to
             # tell us "no, stop!" for any reason)
-            ti_context = self.client.task_instances.start(ti.id, self.pid, datetime.now(tz=timezone.utc))
+            ti_context = self.client.task_instances.start(ti.id, self.pid, start_date)
             self._last_successful_heartbeat = time.monotonic()
         except Exception:
             # On any error kill that subprocess!
@@ -588,9 +620,11 @@ class ActivitySubprocess(WatchedSubprocess):
 
         msg = StartupDetails.model_construct(
             ti=ti,
-            file=os.fspath(path),
+            dag_rel_path=os.fspath(dag_rel_path),
+            bundle_info=bundle_info,
             requests_fd=self._requests_fd,
             ti_context=ti_context,
+            start_date=start_date,
         )
 
         # Send the message to tell the process what it needs to execute
@@ -664,7 +698,6 @@ class ActivitySubprocess(WatchedSubprocess):
         # If the task has reached a terminal state, we can start monitoring the overtime
         if not self._terminal_state:
             return
-
         if (
             self._task_end_time_monotonic
             and (time.monotonic() - self._task_end_time_monotonic) > self.TASK_OVERTIME_THRESHOLD
@@ -738,6 +771,18 @@ class ActivitySubprocess(WatchedSubprocess):
         if isinstance(msg, TaskState):
             self._terminal_state = msg.state
             self._task_end_time_monotonic = time.monotonic()
+        elif isinstance(msg, RuntimeCheckOnTask):
+            runtime_check_resp = self.client.task_instances.runtime_checks(id=self.id, msg=msg)
+            resp = runtime_check_resp.model_dump_json().encode()
+        elif isinstance(msg, SucceedTask):
+            self._terminal_state = msg.state
+            self._task_end_time_monotonic = time.monotonic()
+            self.client.task_instances.succeed(
+                id=self.id,
+                when=msg.end_date,
+                task_outlets=msg.task_outlets,
+                outlet_events=msg.outlet_events,
+            )
         elif isinstance(msg, GetConnection):
             conn = self.client.connections.get(msg.conn_id)
             if isinstance(conn, ConnectionResponse):
@@ -756,6 +801,9 @@ class ActivitySubprocess(WatchedSubprocess):
             xcom = self.client.xcoms.get(msg.dag_id, msg.run_id, msg.task_id, msg.key, msg.map_index)
             xcom_result = XComResult.from_xcom_response(xcom)
             resp = xcom_result.model_dump_json().encode()
+        elif isinstance(msg, GetXComCount):
+            len = self.client.xcoms.head(msg.dag_id, msg.run_id, msg.task_id, msg.key)
+            resp = XComCountResponse(len=len).model_dump_json().encode()
         elif isinstance(msg, DeferTask):
             self._terminal_state = IntermediateTIState.DEFERRED
             self.client.task_instances.defer(self.id, msg)
@@ -768,6 +816,18 @@ class ActivitySubprocess(WatchedSubprocess):
             self.client.variables.set(msg.key, msg.value, msg.description)
         elif isinstance(msg, SetRenderedFields):
             self.client.task_instances.set_rtif(self.id, msg.rendered_fields)
+        elif isinstance(msg, GetAssetByName):
+            asset_resp = self.client.assets.get(name=msg.name)
+            asset_result = AssetResult.from_asset_response(asset_resp)
+            resp = asset_result.model_dump_json(exclude_unset=True).encode()
+        elif isinstance(msg, GetAssetByUri):
+            asset_resp = self.client.assets.get(uri=msg.uri)
+            asset_result = AssetResult.from_asset_response(asset_resp)
+            resp = asset_result.model_dump_json(exclude_unset=True).encode()
+        elif isinstance(msg, GetPrevSuccessfulDagRun):
+            dagrun_resp = self.client.task_instances.get_previous_successful_dagrun(self.id)
+            dagrun_result = PrevSuccessfulDagRunResult.from_dagrun_response(dagrun_resp)
+            resp = dagrun_result.model_dump_json(exclude_unset=True).encode()
         else:
             log.error("Unhandled request", msg=msg)
             return
@@ -865,7 +925,8 @@ def forward_to_log(target_log: FilteringBoundLogger, level: int) -> Generator[No
 def supervise(
     *,
     ti: TaskInstance,
-    dag_path: str | os.PathLike[str],
+    bundle_info: BundleInfo,
+    dag_rel_path: str | os.PathLike[str],
     token: str,
     server: str | None = None,
     dry_run: bool = False,
@@ -876,6 +937,7 @@ def supervise(
     Run a single task execution to completion.
 
     :param ti: The task instance to run.
+    :param dr: Current DagRun of the task instance.
     :param dag_path: The file path to the DAG.
     :param token: Authentication token for the API client.
     :param server: Base URL of the API server.
@@ -888,13 +950,8 @@ def supervise(
     if not client and ((not server) ^ dry_run):
         raise ValueError(f"Can only specify one of {server=} or {dry_run=}")
 
-    if not dag_path:
+    if not dag_rel_path:
         raise ValueError("dag_path is required")
-
-    if (str_path := os.fspath(dag_path)).startswith("DAGS_FOLDER/"):
-        from airflow.settings import DAGS_FOLDER
-
-        dag_path = str_path.replace("DAGS_FOLDER/", DAGS_FOLDER + "/", 1)
 
     if not client:
         limits = httpx.Limits(max_keepalive_connections=1, max_connections=10)
@@ -908,10 +965,7 @@ def supervise(
         # If we are told to write logs to a file, redirect the task logger to it.
         from airflow.sdk.log import init_log_file, logging_processors
 
-        try:
-            log_file = init_log_file(log_path)
-        except OSError as e:
-            log.warning("OSError while changing ownership of the log file. ", e)
+        log_file = init_log_file(log_path)
 
         pretty_logs = False
         if pretty_logs:
@@ -921,7 +975,13 @@ def supervise(
         processors = logging_processors(enable_pretty_log=pretty_logs)[0]
         logger = structlog.wrap_logger(underlying_logger, processors=processors, logger_name="task").bind()
 
-    process = ActivitySubprocess.start(dag_path, ti, client=client, logger=logger)
+    process = ActivitySubprocess.start(
+        dag_rel_path=dag_rel_path,
+        what=ti,
+        client=client,
+        logger=logger,
+        bundle_info=bundle_info,
+    )
 
     exit_code = process.wait()
     end = time.monotonic()

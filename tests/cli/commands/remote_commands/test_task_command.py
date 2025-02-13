@@ -45,19 +45,15 @@ from airflow.exceptions import AirflowException, DagRunNotFound
 from airflow.executors.local_executor import LocalExecutor
 from airflow.models import DagBag, DagRun, Pool, TaskInstance
 from airflow.models.serialized_dag import SerializedDagModel
-from airflow.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.utils import timezone
 from airflow.utils.session import create_session
 from airflow.utils.state import State, TaskInstanceState
-from airflow.utils.types import DagRunType
+from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
 from tests_common.test_utils.config import conf_vars
-from tests_common.test_utils.db import clear_db_pools, clear_db_runs
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.utils.types import DagRunTriggeredByType
+from tests_common.test_utils.db import clear_db_pools, clear_db_runs, parse_and_sync_to_db
 
 pytestmark = pytest.mark.db_test
 
@@ -97,21 +93,22 @@ class TestCliTasks:
     @pytest.fixture(autouse=True)
     def setup_class(cls):
         logging.config.dictConfig(DEFAULT_LOGGING_CONFIG)
-        cls.dagbag = DagBag(include_examples=True)
+        parse_and_sync_to_db(os.devnull, include_examples=True)
         cls.parser = cli_parser.get_parser()
         clear_db_runs()
 
+        cls.dagbag = DagBag(read_dags_from_db=True)
         cls.dag = cls.dagbag.get_dag(cls.dag_id)
-        cls.dagbag.sync_to_db()
         data_interval = cls.dag.timetable.infer_manual_data_interval(run_after=DEFAULT_DATE)
-        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.CLI} if AIRFLOW_V_3_0_PLUS else {}
         cls.dag_run = cls.dag.create_dagrun(
-            state=State.NONE,
+            state=State.RUNNING,
             run_id=cls.run_id,
             run_type=DagRunType.MANUAL,
             logical_date=DEFAULT_DATE,
             data_interval=data_interval,
-            **triggered_by_kwargs,
+            run_after=DEFAULT_DATE,
+            dag_version=None,
+            triggered_by=DagRunTriggeredByType.TEST,
         )
 
     @classmethod
@@ -124,7 +121,6 @@ class TestCliTasks:
             args = self.parser.parse_args(["tasks", "list", dag_id])
             task_command.task_list(args)
 
-    @pytest.mark.filterwarnings("ignore::airflow.utils.context.AirflowContextDeprecationWarning")
     def test_test(self):
         """Test the `airflow test` command"""
         args = self.parser.parse_args(
@@ -137,20 +133,16 @@ class TestCliTasks:
         # Check that prints, and log messages, are shown
         assert "'example_python_operator__print_the_context__20180101'" in stdout.getvalue()
 
-    @pytest.mark.filterwarnings("ignore::airflow.utils.context.AirflowContextDeprecationWarning")
-    @mock.patch("airflow.utils.timezone.utcnow")
-    def test_test_no_logical_date(self, mock_utcnow):
+    def test_test_no_logical_date(self):
         """Test the `airflow test` command"""
-        now = pendulum.now("UTC")
-        mock_utcnow.return_value = now
-        ds = now.strftime("%Y%m%d")
         args = self.parser.parse_args(["tasks", "test", "example_python_operator", "print_the_context"])
 
         with redirect_stdout(io.StringIO()) as stdout:
             task_command.task_test(args)
 
         # Check that prints, and log messages, are shown
-        assert f"'example_python_operator__print_the_context__{ds}'" in stdout.getvalue()
+        assert "example_python_operator" in stdout.getvalue()
+        assert "print_the_context" in stdout.getvalue()
 
     def test_cli_test_different_path(self, session, tmp_path):
         """
@@ -164,19 +156,20 @@ class TestCliTasks:
         with conf_vars({("core", "dags_folder"): orig_dags_folder.as_posix()}):
             dagbag = DagBag(include_examples=False)
             dag = dagbag.get_dag("test_dags_folder")
-            dagbag.sync_to_db(session=session)
+            dagbag.sync_to_db("dags-folder", None, session=session)
 
         logical_date = pendulum.now("UTC")
         data_interval = dag.timetable.infer_manual_data_interval(run_after=logical_date)
-        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
         dag.create_dagrun(
-            state=State.NONE,
+            state=State.RUNNING,
             run_id="abc123",
             run_type=DagRunType.MANUAL,
             logical_date=logical_date,
             data_interval=data_interval,
+            run_after=logical_date,
+            dag_version=None,
+            triggered_by=DagRunTriggeredByType.TEST,
             session=session,
-            **triggered_by_kwargs,
         )
         session.commit()
 
@@ -230,32 +223,23 @@ class TestCliTasks:
         # verify that the file was in different location when run
         assert ti.xcom_pull(ti.task_id) == new_file_path.as_posix()
 
-    @mock.patch("airflow.cli.commands.remote_commands.task_command.select")
-    @mock.patch("sqlalchemy.orm.session.Session.scalar")
-    def test_task_render_with_custom_timetable(self, mock_scalar, mock_select):
+    @mock.patch(
+        "airflow.cli.commands.remote_commands.task_command.fetch_dag_run_from_run_id_or_logical_date_string"
+    )
+    def test_task_render_with_custom_timetable(self, mock_fetch_dag_run_from_run_id_or_logical_date_string):
         """
         Test that the `tasks render` CLI command queries the database correctly
         for a DAG with a custom timetable. Verifies that a query is executed to
         fetch the appropriate DagRun and that the database interaction occurs as expected.
         """
-        from sqlalchemy import select
-
-        from airflow.models.dagrun import DagRun
-
-        mock_query = (
-            select(DagRun).where(DagRun.dag_id == "example_workday_timetable").order_by(DagRun.id.desc())
-        )
-        mock_select.return_value = mock_query
-
-        mock_scalar.return_value = None
+        mock_fetch_dag_run_from_run_id_or_logical_date_string.return_value = (None, None)
 
         task_command.task_render(
             self.parser.parse_args(["tasks", "render", "example_workday_timetable", "run_this", "2022-01-01"])
         )
 
-        mock_select.assert_called_once()
+        mock_fetch_dag_run_from_run_id_or_logical_date_string.assert_called_once()
 
-    @pytest.mark.filterwarnings("ignore::airflow.utils.context.AirflowContextDeprecationWarning")
     def test_test_with_existing_dag_run(self, caplog):
         """Test the `airflow test` command"""
         task_id = "print_the_context"
@@ -268,7 +252,6 @@ class TestCliTasks:
         )
 
     @pytest.mark.enable_redact
-    @pytest.mark.filterwarnings("ignore::airflow.utils.context.AirflowContextDeprecationWarning")
     def test_test_filters_secrets(self, capsys):
         """Test ``airflow test`` does not print secrets to stdout.
 
@@ -491,56 +474,56 @@ class TestCliTasks:
         from airflow.cli.commands.remote_commands import task_command
 
         with dag_maker(dag_id="test_executor", schedule="@daily") as dag:
-            with (
-                mock.patch("airflow.executors.executor_loader.ExecutorLoader.load_executor") as loader_mock,
-                mock.patch(
-                    "airflow.executors.executor_loader.ExecutorLoader.get_default_executor"
-                ) as get_default_mock,
-                mock.patch("airflow.executors.local_executor.SimpleQueue"),  # Prevent a task being queued
-                mock.patch("airflow.executors.local_executor.LocalExecutor.end"),
-            ):
-                EmptyOperator(task_id="task1")
-                EmptyOperator(task_id="task2", executor="foo_executor_alias")
+            EmptyOperator(task_id="task1")
+            EmptyOperator(task_id="task2", executor="foo_executor_alias")
 
-                dag_maker.create_dagrun()
+        dag_maker.create_dagrun()
 
-                # Reload module to consume newly mocked executor loader
-                reload(task_command)
+        with (
+            mock.patch("airflow.executors.executor_loader.ExecutorLoader.load_executor") as loader_mock,
+            mock.patch(
+                "airflow.executors.executor_loader.ExecutorLoader.get_default_executor"
+            ) as get_default_mock,
+            mock.patch("airflow.executors.local_executor.SimpleQueue"),  # Prevent a task being queued
+            mock.patch("airflow.executors.local_executor.LocalExecutor.end"),
+        ):
+            # Reload module to consume newly mocked executor loader
+            reload(task_command)
 
-                loader_mock.return_value = LocalExecutor()
-                get_default_mock.return_value = LocalExecutor()
+            loader_mock.return_value = LocalExecutor()
+            get_default_mock.return_value = LocalExecutor()
 
-                # In the task1 case we will use the default executor
-                task_command.task_run(
-                    self.parser.parse_args(
-                        [
-                            "tasks",
-                            "run",
-                            "test_executor",
-                            "task1",
-                            DEFAULT_DATE.isoformat(),
-                        ]
-                    ),
-                    dag,
-                )
-                get_default_mock.assert_called_once()
-                loader_mock.assert_not_called()
+            # In the task1 case we will use the default executor
+            task_command.task_run(
+                self.parser.parse_args(
+                    [
+                        "tasks",
+                        "run",
+                        "test_executor",
+                        "task1",
+                        DEFAULT_DATE.isoformat(),
+                    ]
+                ),
+                dag,
+            )
+            get_default_mock.assert_called_once()
+            loader_mock.assert_not_called()
 
-                # In the task2 case we will use the executor configured on the task
-                task_command.task_run(
-                    self.parser.parse_args(
-                        [
-                            "tasks",
-                            "run",
-                            "test_executor",
-                            "task2",
-                            DEFAULT_DATE.isoformat(),
-                        ]
-                    ),
-                    dag,
-                )
-                get_default_mock.assert_called_once()  # Call from previous task
-                loader_mock.assert_called_once_with("foo_executor_alias")
+            # In the task2 case we will use the executor configured on the task
+            task_command.task_run(
+                self.parser.parse_args(
+                    [
+                        "tasks",
+                        "run",
+                        "test_executor",
+                        "task2",
+                        DEFAULT_DATE.isoformat(),
+                    ]
+                ),
+                dag,
+            )
+            get_default_mock.assert_called_once()  # Call from previous task
+            loader_mock.assert_called_once_with("foo_executor_alias")
 
         # Reload module to remove mocked version of executor loader
         reload(task_command)
@@ -633,14 +616,16 @@ class TestCliTasks:
         default_date2 = timezone.datetime(2016, 1, 9)
         dag2.clear()
         data_interval = dag2.timetable.infer_manual_data_interval(run_after=default_date2)
-        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.CLI} if AIRFLOW_V_3_0_PLUS else {}
         dagrun = dag2.create_dagrun(
+            run_id="test",
             state=State.RUNNING,
             logical_date=default_date2,
             data_interval=data_interval,
+            run_after=default_date2,
             run_type=DagRunType.MANUAL,
             external_trigger=True,
-            **triggered_by_kwargs,
+            dag_version=None,
+            triggered_by=DagRunTriggeredByType.CLI,
         )
         ti2 = TaskInstance(task2, run_id=dagrun.run_id)
         ti2.set_state(State.SUCCESS)
@@ -714,15 +699,16 @@ class TestLogsfromTaskRunCommand:
 
         dag = DagBag().get_dag(self.dag_id)
         data_interval = dag.timetable.infer_manual_data_interval(run_after=self.logical_date)
-        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
         self.dr = dag.create_dagrun(
             run_id=self.run_id,
             logical_date=self.logical_date,
             data_interval=data_interval,
+            run_after=self.logical_date,
             start_date=timezone.utcnow(),
             state=State.RUNNING,
             run_type=DagRunType.MANUAL,
-            **triggered_by_kwargs,
+            dag_version=None,
+            triggered_by=DagRunTriggeredByType.TEST,
         )
         self.tis = self.dr.get_task_instances()
         assert len(self.tis) == 1
@@ -1019,15 +1005,17 @@ def test_context_with_run():
 
     dag = DagBag().get_dag(dag_id)
     data_interval = dag.timetable.infer_manual_data_interval(run_after=logical_date)
-    triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
+
     dag.create_dagrun(
         run_id=run_id,
         logical_date=logical_date,
         data_interval=data_interval,
+        run_after=logical_date,
         start_date=timezone.utcnow(),
         state=State.RUNNING,
         run_type=DagRunType.MANUAL,
-        **triggered_by_kwargs,
+        dag_version=None,
+        triggered_by=DagRunTriggeredByType.TEST,
     )
     with conf_vars({("core", "dags_folder"): dag_path}):
         task_command.task_run(parser.parse_args(task_args))
