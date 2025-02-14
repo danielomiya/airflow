@@ -20,9 +20,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from pydantic import AwareDatetime, Field, NonNegativeInt, computed_field, model_validator
+from pydantic import AwareDatetime, Field, NonNegativeInt, model_validator
 
-from airflow.api_fastapi.core_api.base import BaseModel
+from airflow.api_fastapi.core_api.base import BaseModel, StrictBaseModel
 from airflow.models import DagRun
 from airflow.utils import timezone
 from airflow.utils.state import DagRunState
@@ -37,14 +37,14 @@ class DAGRunPatchStates(str, Enum):
     FAILED = DagRunState.FAILED
 
 
-class DAGRunPatchBody(BaseModel):
+class DAGRunPatchBody(StrictBaseModel):
     """DAG Run Serializer for PATCH requests."""
 
     state: DAGRunPatchStates | None = None
     note: str | None = Field(None, max_length=1000)
 
 
-class DAGRunClearBody(BaseModel):
+class DAGRunClearBody(StrictBaseModel):
     """DAG Run serializer for clear endpoint body."""
 
     dry_run: bool = True
@@ -62,6 +62,7 @@ class DAGRunResponse(BaseModel):
     end_date: datetime | None
     data_interval_start: datetime | None
     data_interval_end: datetime | None
+    run_after: datetime
     last_scheduling_decision: datetime | None
     run_type: DagRunType
     state: DagRunState
@@ -78,12 +79,14 @@ class DAGRunCollectionResponse(BaseModel):
     total_entries: int
 
 
-class TriggerDAGRunPostBody(BaseModel):
+class TriggerDAGRunPostBody(StrictBaseModel):
     """Trigger DAG Run Serializer for POST body."""
 
     dag_run_id: str | None = None
     data_interval_start: AwareDatetime | None = None
     data_interval_end: AwareDatetime | None = None
+    logical_date: AwareDatetime | None
+    run_after: datetime = Field(default_factory=timezone.utcnow)
 
     conf: dict = Field(default_factory=dict)
     note: str | None = None
@@ -99,17 +102,13 @@ class TriggerDAGRunPostBody(BaseModel):
     @model_validator(mode="after")
     def validate_dag_run_id(self):
         if not self.dag_run_id:
-            self.dag_run_id = DagRun.generate_run_id(DagRunType.MANUAL, self.logical_date)
+            self.dag_run_id = DagRun.generate_run_id(
+                run_type=DagRunType.MANUAL, logical_date=self.logical_date, run_after=self.run_after
+            )
         return self
 
-    # Mypy issue https://github.com/python/mypy/issues/1362
-    @computed_field  # type: ignore[misc]
-    @property
-    def logical_date(self) -> datetime:
-        return timezone.utcnow()
 
-
-class DAGRunsBatchBody(BaseModel):
+class DAGRunsBatchBody(StrictBaseModel):
     """List DAG Runs body for batch endpoint."""
 
     order_by: str | None = None
@@ -117,6 +116,8 @@ class DAGRunsBatchBody(BaseModel):
     page_limit: NonNegativeInt = 100
     dag_ids: list[str] | None = None
     states: list[DagRunState | None] | None = None
+    run_after_gte: AwareDatetime | None = None
+    run_after_lte: AwareDatetime | None = None
     logical_date_gte: AwareDatetime | None = None
     logical_date_lte: AwareDatetime | None = None
     start_date_gte: AwareDatetime | None = None

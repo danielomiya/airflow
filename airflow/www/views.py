@@ -74,7 +74,7 @@ from jinja2.utils import htmlsafe_json_dumps, pformat  # type: ignore
 from markupsafe import Markup, escape
 from pendulum.datetime import DateTime
 from pendulum.parsing.exceptions import ParserError
-from sqlalchemy import and_, case, desc, func, inspect, or_, select, union_all
+from sqlalchemy import and_, case, desc, func, inspect, or_, select, tuple_, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
 from wtforms import BooleanField, validators
@@ -114,6 +114,7 @@ from airflow.models.taskinstance import TaskInstance, TaskInstanceNote
 from airflow.plugins_manager import PLUGINS_ATTRIBUTES_TO_DUMP
 from airflow.providers_manager import ProvidersManager
 from airflow.sdk.definitions.asset import Asset, AssetAlias
+from airflow.sdk.execution_time import secrets_masker
 from airflow.security import permissions
 from airflow.ti_deps.dep_context import DepContext
 from airflow.ti_deps.dependencies_deps import SCHEDULER_QUEUED_DEPS
@@ -127,7 +128,6 @@ from airflow.utils.dag_edges import dag_edges
 from airflow.utils.db import get_query_count
 from airflow.utils.docs import get_doc_url_for_provider, get_docs_url
 from airflow.utils.helpers import exactly_one
-from airflow.utils.log import secrets_masker
 from airflow.utils.log.log_reader import TaskLogReader
 from airflow.utils.net import get_hostname
 from airflow.utils.session import NEW_SESSION, create_session, provide_session
@@ -440,7 +440,8 @@ def dag_to_grid(dag: DagModel, dag_runs: Sequence[DagRun], session: Session) -> 
                 "id": item.task_id,
                 "instances": instances,
                 "label": item.label,
-                "extra_links": item.extra_links,
+                # TODO: Task-SDK: MappedOperator doesn't support extra links right now
+                "extra_links": getattr(item, "extra_links", []),
                 "is_mapped": item_is_mapped,
                 "has_outlet_assets": any(isinstance(i, (Asset, AssetAlias)) for i in (item.outlets or [])),
                 "operator": item.operator_name,
@@ -729,7 +730,7 @@ class AirflowBaseView(BaseView):
 
         if "dag" in kwargs:
             kwargs["can_edit_dag"] = get_auth_manager().is_authorized_dag(
-                method="PUT", details=DagDetails(id=kwargs["dag"].dag_id)
+                method="PUT", details=DagDetails(id=kwargs["dag"].dag_id), user=g.user
             )
             url_serializer = URLSafeSerializer(current_app.config["SECRET_KEY"])
             kwargs["dag_file_token"] = url_serializer.dumps(kwargs["dag"].fileloc)
@@ -1010,16 +1011,18 @@ class Airflow(AirflowBaseView):
 
             owner_links_dict = DagOwnerAttributes.get_all(session)
 
-            if get_auth_manager().is_authorized_view(access_view=AccessView.IMPORT_ERRORS):
+            if get_auth_manager().is_authorized_view(access_view=AccessView.IMPORT_ERRORS, user=g.user):
                 import_errors = select(ParseImportError).order_by(ParseImportError.id)
 
-                can_read_all_dags = get_auth_manager().is_authorized_dag(method="GET")
+                can_read_all_dags = get_auth_manager().is_authorized_dag(method="GET", user=g.user)
                 if not can_read_all_dags:
                     # if the user doesn't have access to all DAGs, only display errors from visible DAGs
                     import_errors = import_errors.where(
-                        ParseImportError.filename.in_(
-                            select(DagModel.fileloc).distinct().where(DagModel.dag_id.in_(filter_dag_ids))
-                        )
+                        tuple_(ParseImportError.filename, ParseImportError.bundle_name).in_(
+                            select(DagModel.fileloc, DagModel.bundle_name)
+                            .distinct()
+                            .where(DagModel.dag_id.in_(filter_dag_ids))
+                        ),
                     )
 
                 import_errors = session.scalars(import_errors)
@@ -1039,7 +1042,9 @@ class Airflow(AirflowBaseView):
                             }
                             for dag_id in file_dag_ids
                         ]
-                        if not get_auth_manager().batch_is_authorized_dag(requests):
+                        if not get_auth_manager().batch_is_authorized_dag(
+                            requests, user=get_auth_manager().get_user()
+                        ):
                             stacktrace = "REDACTED - you do not have read permission on all DAGs in the file"
                     flash(
                         f"Broken DAG: [{import_error.filename}]\r{stacktrace}",
@@ -1156,12 +1161,10 @@ class Airflow(AirflowBaseView):
         """Cluster Activity view."""
         state_color_mapping = State.state_color.copy()
         state_color_mapping["no_status"] = state_color_mapping.pop(None)
-        standalone_dag_processor = conf.getboolean("scheduler", "standalone_dag_processor")
         return self.render_template(
             "airflow/cluster_activity.html",
             auto_refresh_interval=conf.getint("webserver", "auto_refresh_interval"),
             state_color_mapping=state_color_mapping,
-            standalone_dag_processor=standalone_dag_processor,
         )
 
     @expose("/next_run_assets_summary", methods=["POST"])
@@ -1772,7 +1775,7 @@ class Airflow(AirflowBaseView):
             title="Log by attempts",
             dag_id=dag_id,
             task_id=task_id,
-            task_display_name=ti.task_display_name,
+            task_display_name=ti.task_display_name if ti else "",
             logical_date=logical_date,
             map_index=map_index,
             form=form,
@@ -2029,7 +2032,8 @@ class Airflow(AirflowBaseView):
         origin = get_safe_url(request.values.get("origin"))
         unpause = request.values.get("unpause")
         request_conf = request.values.get("conf")
-        request_logical_date = request.values.get("logical_date", default=timezone.utcnow().isoformat())
+        request_logical_date = request.values.get("logical_date")
+        request_run_after = request.values.get("run_after", default=timezone.utcnow().isoformat())
         is_dag_run_conf_overrides_params = conf.getboolean("core", "dag_run_conf_overrides_params")
         dag = get_airflow_app().dag_bag.get_dag(dag_id)
         dag_orm: DagModel = session.scalar(select(DagModel).where(DagModel.dag_id == dag_id).limit(1))
@@ -2145,10 +2149,23 @@ class Airflow(AirflowBaseView):
             )
 
         try:
-            logical_date = timezone.parse(request_logical_date, strict=True)
+            logical_date = timezone.parse(request_logical_date, strict=True) if request_logical_date else None
         except ParserError:
             flash("Invalid logical date", "error")
             form = DateTimeForm(data={"logical_date": timezone.utcnow().isoformat()})
+            return self.render_template(
+                "airflow/trigger.html",
+                form_fields=form_fields,
+                **render_params,
+                conf=request_conf or {},
+                form=form,
+            )
+
+        try:
+            run_after = timezone.parse(request_run_after, strict=True)
+        except ParserError:
+            flash("Invalid run_after", "error")
+            form = DateTimeForm(data={"run_after": timezone.utcnow().isoformat()})
             return self.render_template(
                 "airflow/trigger.html",
                 form_fields=form_fields,
@@ -2221,18 +2238,32 @@ class Airflow(AirflowBaseView):
                     "warning",
                 )
 
-        try:
-            dag_version = DagVersion.get_latest_version(dag.dag_id)
-            dag_run = dag.create_dagrun(
+        if logical_date:
+            data_interval = dag.timetable.infer_manual_data_interval(run_after=logical_date or run_after)
+            run_after = data_interval.end
+        else:
+            data_interval = None
+
+        if not run_id:
+            run_id = DagRun.generate_run_id(
                 run_type=DagRunType.MANUAL,
                 logical_date=logical_date,
-                data_interval=dag.timetable.infer_manual_data_interval(run_after=logical_date),
-                state=DagRunState.QUEUED,
-                conf=run_conf,
-                external_trigger=True,
-                dag_version=dag_version,
+                run_after=run_after,
+            )
+
+        try:
+            dag_run = dag.create_dagrun(
                 run_id=run_id,
+                logical_date=logical_date,
+                data_interval=data_interval,
+                run_after=run_after,
+                conf=run_conf,
+                run_type=DagRunType.MANUAL,
                 triggered_by=DagRunTriggeredByType.UI,
+                external_trigger=True,
+                dag_version=DagVersion.get_latest_version(dag.dag_id),
+                state=DagRunState.QUEUED,
+                session=session,
             )
         except (ValueError, ParamValidationError) as ve:
             flash(f"{ve}", "error")
@@ -2876,10 +2907,10 @@ class Airflow(AirflowBaseView):
         dag = get_airflow_app().dag_bag.get_dag(dag_id, session=session)
         url_serializer = URLSafeSerializer(current_app.config["SECRET_KEY"])
         dag_model = DagModel.get_dagmodel(dag_id, session=session)
-        if not dag:
+        if not dag or not dag_model:
             flash(f'DAG "{dag_id}" seems to be missing from DagBag.', "error")
             return redirect(url_for("Airflow.index"))
-        wwwutils.check_import_errors(dag.fileloc, session)
+        wwwutils.check_import_errors(dag.fileloc, dag_model.bundle_name, session)
         wwwutils.check_dag_warnings(dag.dag_id, session)
 
         included_events_raw = conf.get("webserver", "audit_view_included_events", fallback="")
@@ -2911,6 +2942,7 @@ class Airflow(AirflowBaseView):
         can_edit_taskinstance = get_auth_manager().is_authorized_dag(
             method="PUT",
             access_entity=DagAccessEntity.TASK_INSTANCE,
+            user=g.user,
         )
 
         return self.render_template(
@@ -4596,7 +4628,9 @@ class VariableModelView(AirflowModelView):
             item, orders=orders, pages=pages, page_sizes=page_sizes, widgets=widgets
         )
 
-    extra_args = {"can_create_variable": lambda: get_auth_manager().is_authorized_variable(method="POST")}
+    extra_args = {
+        "can_create_variable": lambda: get_auth_manager().is_authorized_variable(method="POST", user=g.user)
+    }
 
     @action("muldelete", "Delete", "Are you sure you want to delete selected records?", single=False)
     @auth.has_access_variable("DELETE")
@@ -4758,6 +4792,8 @@ class DagRunModelView(AirflowModelView):
         permissions.ACTION_CAN_ACCESS_MENU,
     ]
 
+    add_exclude_columns = ["conf"]
+
     list_columns = [
         "state",
         "dag_id",
@@ -4793,7 +4829,6 @@ class DagRunModelView(AirflowModelView):
         "start_date",
         "end_date",
         "run_id",
-        "conf",
         "note",
     ]
 
@@ -5531,7 +5566,7 @@ class DagDependenciesView(AirflowBaseView):
         seconds=conf.getint(
             "webserver",
             "dag_dependencies_refresh_interval",
-            fallback=conf.getint("scheduler", "dag_dir_list_interval"),
+            fallback=300,
         )
     )
     last_refresh = timezone.utcnow() - refresh_interval
@@ -5594,12 +5629,16 @@ def add_user_permissions_to_dag(sender, template, context, **extra):
         return
     dag = context["dag"]
     can_create_dag_run = get_auth_manager().is_authorized_dag(
-        method="POST", access_entity=DagAccessEntity.RUN, details=DagDetails(id=dag.dag_id)
+        method="POST", access_entity=DagAccessEntity.RUN, details=DagDetails(id=dag.dag_id), user=g.user
     )
 
-    dag.can_edit = get_auth_manager().is_authorized_dag(method="PUT", details=DagDetails(id=dag.dag_id))
+    dag.can_edit = get_auth_manager().is_authorized_dag(
+        method="PUT", details=DagDetails(id=dag.dag_id), user=g.user
+    )
     dag.can_trigger = dag.can_edit and can_create_dag_run
-    dag.can_delete = get_auth_manager().is_authorized_dag(method="DELETE", details=DagDetails(id=dag.dag_id))
+    dag.can_delete = get_auth_manager().is_authorized_dag(
+        method="DELETE", details=DagDetails(id=dag.dag_id), user=g.user
+    )
     context["dag"] = dag
 
 

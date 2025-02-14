@@ -21,7 +21,6 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 from airflow.exceptions import AirflowOptionalProviderFeatureException
-from airflow.models import Connection, Operator
 from airflow.utils.helpers import prune_dict
 
 from tests_common.test_utils.version_compat import AIRFLOW_V_2_10_PLUS
@@ -44,6 +43,7 @@ except ImportError:
 
 try:
     from airflow.providers.standard.operators.bash import BashOperator
+    from airflow.providers.standard.operators.empty import EmptyOperator
     from airflow.providers.standard.operators.generic_transfer import GenericTransfer
     from airflow.providers.standard.operators.python import PythonOperator
     from airflow.providers.standard.sensors.bash import BashSensor
@@ -52,6 +52,7 @@ try:
 except ImportError:
     # Compatibility for Airflow < 2.10.*
     from airflow.operators.bash import BashOperator  # type: ignore[no-redef,attr-defined]
+    from airflow.operators.empty import EmptyOperator  # type: ignore[no-redef,attr-defined]
     from airflow.operators.generic_transfer import GenericTransfer  # type: ignore[no-redef,attr-defined]
     from airflow.operators.python import PythonOperator  # type: ignore[no-redef,attr-defined]
     from airflow.sensors.bash import BashSensor  # type: ignore[no-redef,attr-defined]
@@ -60,6 +61,7 @@ except ImportError:
 
 
 if TYPE_CHECKING:
+    from airflow.models import Connection
     from airflow.models.asset import (
         AssetAliasModel,
         AssetDagRunQueue,
@@ -68,6 +70,7 @@ if TYPE_CHECKING:
         DagScheduleAssetReference,
         TaskOutletAssetReference,
     )
+    from airflow.sdk.types import Operator
 else:
     try:
         from airflow.models.asset import (
@@ -103,7 +106,7 @@ def deserialize_operator(serialized_operator: dict[str, Any]) -> Operator:
         # are updated to airflow 2.10+.
         from airflow.serialization.serialized_objects import BaseSerialization
 
-        return cast(Operator, BaseSerialization.deserialize(serialized_operator))
+        return BaseSerialization.deserialize(serialized_operator)
     else:
         from airflow.serialization.serialized_objects import SerializedBaseOperator
 

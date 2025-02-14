@@ -72,6 +72,8 @@ def create_app(config=None, testing=False):
     flask_app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=settings.get_session_lifetime_config())
 
     flask_app.config["MAX_CONTENT_LENGTH"] = conf.getfloat("webserver", "allowed_payload_size") * 1024 * 1024
+    flask_app.config["MAX_FORM_PARTS"] = conf.getint("webserver", "max_form_parts")
+    flask_app.config["MAX_FORM_MEMORY_SIZE"] = conf.getint("webserver", "max_form_memory_size")
 
     webserver_config = conf.get_mandatory_value("webserver", "config_file")
     # Enable customizations in webserver_config.py to be applied via Flask.current_app.
@@ -107,7 +109,9 @@ def create_app(config=None, testing=False):
     flask_app.config["SESSION_COOKIE_SECURE"] = conf.getboolean("webserver", "COOKIE_SECURE")
 
     # Note: Ensure "Lax" is the default if config not specified
-    flask_app.config["SESSION_COOKIE_SAMESITE"] = conf.get("webserver", "COOKIE_SAMESITE") or "Lax"
+    flask_app.config["SESSION_COOKIE_SAMESITE"] = (
+        conf.get("webserver", "COOKIE_SAMESITE", fallback=None) or "Lax"
+    )
 
     # Above Flask 2.0.x, default value of SEND_FILE_MAX_AGE_DEFAULT changed 12 hours to None.
     # for static file caching, it needs to set value explicitly.

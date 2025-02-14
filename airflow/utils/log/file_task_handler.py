@@ -24,7 +24,6 @@ import os
 from collections.abc import Iterable
 from contextlib import suppress
 from enum import Enum
-from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urljoin
@@ -34,16 +33,14 @@ import pendulum
 from airflow.configuration import conf
 from airflow.exceptions import AirflowException
 from airflow.executors.executor_loader import ExecutorLoader
-from airflow.utils.context import Context
-from airflow.utils.helpers import parse_template_string, render_template_to_string
+from airflow.utils.helpers import parse_template_string, render_template
 from airflow.utils.log.logging_mixin import SetContextPropagate
 from airflow.utils.log.non_caching_file_handler import NonCachingRotatingFileHandler
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.state import State, TaskInstanceState
 
 if TYPE_CHECKING:
-    from pendulum import DateTime
-
+    from airflow.executors.base_executor import BaseExecutor
     from airflow.models.taskinstance import TaskInstance
     from airflow.models.taskinstancekey import TaskInstanceKey
 
@@ -179,6 +176,8 @@ class FileTaskHandler(logging.Handler):
     inherits_from_empty_operator_log_message = (
         "Operator inherits from empty operator and thus does not have logs"
     )
+    executor_instances: dict[str, BaseExecutor] = {}
+    DEFAULT_EXECUTOR_KEY = "_default_executor"
 
     def __init__(
         self,
@@ -267,29 +266,17 @@ class FileTaskHandler(logging.Handler):
         """Return the worker log filename."""
         ti = _ensure_ti(ti, session)
         dag_run = ti.get_dagrun(session=session)
+
+        date = dag_run.logical_date or dag_run.run_after
+        date = date.isoformat()
+
         template = dag_run.get_log_template(session=session).filename
         str_tpl, jinja_tpl = parse_template_string(template)
-        filename = None
         if jinja_tpl:
-            if getattr(ti, "task", None) is not None:
-                context = ti.get_template_context(session=session)
-            else:
-                context = Context(ti=ti, ts=dag_run.logical_date.isoformat())
-            context["try_number"] = try_number
-            filename = render_template_to_string(jinja_tpl, context)
-        if filename:
-            return filename
-        if str_tpl:
-            if ti.task is not None and ti.task.dag is not None:
-                dag = ti.task.dag
-                data_interval = dag.get_run_data_interval(dag_run)
-            else:
-                from airflow.timetables.base import DataInterval
+            return render_template(jinja_tpl, {"ti": ti, "ts": date, "try_number": try_number}, native=False)
 
-                if TYPE_CHECKING:
-                    assert isinstance(dag_run.data_interval_start, DateTime)
-                    assert isinstance(dag_run.data_interval_end, DateTime)
-                data_interval = DataInterval(dag_run.data_interval_start, dag_run.data_interval_end)
+        if str_tpl:
+            data_interval = (dag_run.data_interval_start, dag_run.data_interval_end)
             if data_interval[0]:
                 data_interval_start = data_interval[0].isoformat()
             else:
@@ -304,7 +291,7 @@ class FileTaskHandler(logging.Handler):
                 run_id=ti.run_id,
                 data_interval_start=data_interval_start,
                 data_interval_end=data_interval_end,
-                logical_date=ti.get_dagrun().logical_date.isoformat(),
+                logical_date=date,
                 try_number=try_number,
             )
         else:
@@ -313,11 +300,27 @@ class FileTaskHandler(logging.Handler):
     def _read_grouped_logs(self):
         return False
 
-    @cached_property
-    def _executor_get_task_log(self) -> Callable[[TaskInstance, int], tuple[list[str], list[str]]]:
-        """This cached property avoids loading executor repeatedly."""
-        executor = ExecutorLoader.get_default_executor()
-        return executor.get_task_log
+    def _get_executor_get_task_log(
+        self, ti: TaskInstance
+    ) -> Callable[[TaskInstance, int], tuple[list[str], list[str]]]:
+        """
+        Get the get_task_log method from executor of current task instance.
+
+        Since there might be multiple executors, so we need to get the executor of current task instance instead of getting from default executor.
+
+        :param ti: task instance object
+        :return: get_task_log method of the executor
+        """
+        executor_name = ti.executor or self.DEFAULT_EXECUTOR_KEY
+        executor = self.executor_instances.get(executor_name)
+        if executor is not None:
+            return executor.get_task_log
+
+        if executor_name == self.DEFAULT_EXECUTOR_KEY:
+            self.executor_instances[executor_name] = ExecutorLoader.get_default_executor()
+        else:
+            self.executor_instances[executor_name] = ExecutorLoader.load_executor(executor_name)
+        return self.executor_instances[executor_name].get_task_log
 
     def _read(
         self,
@@ -359,7 +362,8 @@ class FileTaskHandler(logging.Handler):
             messages_list.extend(remote_messages)
         has_k8s_exec_pod = False
         if ti.state == TaskInstanceState.RUNNING:
-            response = self._executor_get_task_log(ti, try_number)
+            executor_get_task_log = self._get_executor_get_task_log(ti)
+            response = executor_get_task_log(ti, try_number)
             if response:
                 executor_messages, executor_logs = response
             if executor_messages:

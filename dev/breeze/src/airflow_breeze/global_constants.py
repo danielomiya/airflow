@@ -22,29 +22,10 @@ from __future__ import annotations
 
 import json
 import platform
-import sys
 from enum import Enum
-
-from airflow_breeze.utils.console import get_console
-
-try:
-    from functools import cache
-except ImportError:
-    get_console().print(
-        "\n[error]Breeze doesn't support Python version <=3.8\n\n"
-        "[warning]Use Python 3.9 and force reinstall breeze:"
-        ""
-        " either with uv: \n\n"
-        "     uv tool install --force --reinstall --editable ./dev/breeze\n\n"
-        ""
-        " or with pipx\n\n"
-        "     pipx install --force -e ./dev/breeze --python 3.9\n"
-        "\nTo find out more, visit [info]https://github.com/apache/airflow/"
-        "blob/main/dev/breeze/doc/01_installation.rst[/]\n"
-    )
-    sys.exit(1)
 from pathlib import Path
 
+from airflow_breeze.utils.functools_cache import clearable_cache
 from airflow_breeze.utils.host_info_utils import Architecture
 from airflow_breeze.utils.path_utils import AIRFLOW_SOURCES_ROOT
 
@@ -167,9 +148,13 @@ START_AIRFLOW_ALLOWED_EXECUTORS = [LOCAL_EXECUTOR, CELERY_EXECUTOR, EDGE_EXECUTO
 START_AIRFLOW_DEFAULT_ALLOWED_EXECUTOR = START_AIRFLOW_ALLOWED_EXECUTORS[0]
 ALLOWED_CELERY_EXECUTORS = [CELERY_EXECUTOR, CELERY_K8S_EXECUTOR]
 
+CONSTRAINTS_SOURCE_PROVIDERS = "constraints-source-providers"
+CONSTRAINTS = "constraints"
+CONSTRAINTS_NO_PROVIDERS = "constraints-no-providers"
+
 ALLOWED_KIND_OPERATIONS = ["start", "stop", "restart", "status", "deploy", "test", "shell", "k9s"]
-ALLOWED_CONSTRAINTS_MODES_CI = ["constraints-source-providers", "constraints", "constraints-no-providers"]
-ALLOWED_CONSTRAINTS_MODES_PROD = ["constraints", "constraints-no-providers", "constraints-source-providers"]
+ALLOWED_CONSTRAINTS_MODES_CI = [CONSTRAINTS_SOURCE_PROVIDERS, CONSTRAINTS, CONSTRAINTS_NO_PROVIDERS]
+ALLOWED_CONSTRAINTS_MODES_PROD = [CONSTRAINTS, CONSTRAINTS_NO_PROVIDERS, CONSTRAINTS_SOURCE_PROVIDERS]
 
 ALLOWED_CELERY_BROKERS = ["rabbitmq", "redis"]
 DEFAULT_CELERY_BROKER = ALLOWED_CELERY_BROKERS[1]
@@ -207,8 +192,8 @@ if MYSQL_INNOVATION_RELEASE:
 
 ALLOWED_INSTALL_MYSQL_CLIENT_TYPES = ["mariadb", "mysql"]
 
-PIP_VERSION = "24.3.1"
-UV_VERSION = "0.5.14"
+PIP_VERSION = "25.0"
+UV_VERSION = "0.5.26"
 
 DEFAULT_UV_HTTP_TIMEOUT = 300
 DEFAULT_WSL2_HTTP_TIMEOUT = 900
@@ -222,12 +207,12 @@ REGULAR_DOC_PACKAGES = [
 ]
 
 
-@cache
+@clearable_cache
 def all_selective_core_test_types() -> tuple[str, ...]:
     return tuple(sorted(e.value for e in SelectiveCoreTestType))
 
 
-@cache
+@clearable_cache
 def providers_test_type() -> tuple[str, ...]:
     return tuple(sorted(e.value for e in SelectiveProvidersTestType))
 
@@ -278,7 +263,7 @@ ALL_TEST_SUITES: dict[str, tuple[str, ...]] = {
 }
 
 
-@cache
+@clearable_cache
 def all_helm_test_packages() -> list[str]:
     return sorted(
         [
@@ -297,7 +282,7 @@ ALLOWED_TEST_TYPE_CHOICES: dict[GroupOfTests, list[str]] = {
 }
 
 
-@cache
+@clearable_cache
 def all_task_sdk_test_packages() -> list[str]:
     try:
         return sorted(
@@ -517,7 +502,7 @@ def get_airflow_version():
     return airflow_version
 
 
-@cache
+@clearable_cache
 def get_airflow_extras():
     airflow_dockerfile = AIRFLOW_SOURCES_ROOT / "Dockerfile"
     with open(airflow_dockerfile) as dockerfile:
@@ -528,7 +513,7 @@ def get_airflow_extras():
 
 
 # Initialize integrations
-ALL_PROVIDER_YAML_FILES = Path(AIRFLOW_SOURCES_ROOT, "airflow", "providers").rglob("provider.yaml")
+ALL_PROVIDER_YAML_FILES = Path(AIRFLOW_SOURCES_ROOT, "providers").rglob("provider.yaml")
 PROVIDER_RUNTIME_DATA_SCHEMA_PATH = AIRFLOW_SOURCES_ROOT / "airflow" / "provider_info.schema.json"
 
 with Path(AIRFLOW_SOURCES_ROOT, "generated", "provider_dependencies.json").open() as f:
@@ -637,6 +622,6 @@ class GithubEvents(Enum):
     WORKFLOW_RUN = "workflow_run"
 
 
-@cache
+@clearable_cache
 def github_events() -> list[str]:
     return [e.value for e in GithubEvents]

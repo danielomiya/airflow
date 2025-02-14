@@ -41,10 +41,12 @@ import { SearchBar } from "src/components/SearchBar";
 import { TogglePause } from "src/components/TogglePause";
 import TriggerDAGButton from "src/components/TriggerDag/TriggerDAGButton";
 import { SearchParamsKeys, type SearchParamsKeysType } from "src/constants/searchParams";
+import { DagsLayout } from "src/layouts/DagsLayout";
 import { useConfig } from "src/queries/useConfig";
 import { useDags } from "src/queries/useDags";
 import { pluralize } from "src/utils";
 
+import { DAGImportErrors } from "../Dashboard/Stats/DAGImportErrors";
 import { DagCard } from "./DagCard";
 import { DagTags } from "./DagTags";
 import { DagsFilters } from "./DagsFilters";
@@ -85,11 +87,10 @@ const columns: Array<ColumnDef<DAGWithLatestDagRunsResponse>> = [
   {
     accessorKey: "next_dagrun",
     cell: ({ row: { original } }) =>
-      Boolean(original.next_dagrun) ? (
+      Boolean(original.next_dagrun_create_after) ? (
         <DagRunInfo
-          dataIntervalEnd={original.next_dagrun_data_interval_end}
-          dataIntervalStart={original.next_dagrun_data_interval_start}
-          nextDagrunCreateAfter={original.next_dagrun_create_after}
+          logicalDate={original.next_dagrun}
+          runAfter={original.next_dagrun_create_after as string}
         />
       ) : undefined,
     header: "Next Dag Run",
@@ -99,9 +100,9 @@ const columns: Array<ColumnDef<DAGWithLatestDagRunsResponse>> = [
     cell: ({ row: { original } }) =>
       original.latest_dag_runs[0] ? (
         <DagRunInfo
-          dataIntervalEnd={original.latest_dag_runs[0].data_interval_end}
-          dataIntervalStart={original.latest_dag_runs[0].data_interval_start}
           endDate={original.latest_dag_runs[0].end_date}
+          logicalDate={original.latest_dag_runs[0].logical_date}
+          runAfter={original.latest_dag_runs[0].run_after}
           startDate={original.latest_dag_runs[0].start_date}
           state={original.latest_dag_runs[0].state}
         />
@@ -188,7 +189,7 @@ export const DagsList = () => {
     paused = false;
   }
 
-  const { data, error, isFetching, isLoading } = useDags({
+  const { data, error, isLoading } = useDags({
     dagDisplayNamePattern: Boolean(dagDisplayNamePattern) ? `${dagDisplayNamePattern}` : undefined,
     lastDagRunState,
     limit: pagination.pageSize,
@@ -213,7 +214,7 @@ export const DagsList = () => {
   );
 
   return (
-    <>
+    <DagsLayout>
       <VStack alignItems="none">
         <SearchBar
           buttonProps={{ disabled: true }}
@@ -223,9 +224,12 @@ export const DagsList = () => {
         />
         <DagsFilters />
         <HStack justifyContent="space-between">
-          <Heading py={3} size="md">
-            {pluralize("Dag", data.total_entries)}
-          </Heading>
+          <HStack>
+            <Heading py={3} size="md">
+              {pluralize("Dag", data.total_entries)}
+            </Heading>
+            <DAGImportErrors iconOnly />
+          </HStack>
           {display === "card" ? (
             <SortSelect handleSortChange={handleSortChange} orderBy={orderBy} />
           ) : undefined}
@@ -240,7 +244,6 @@ export const DagsList = () => {
           displayMode={display}
           errorMessage={<ErrorAlert error={error} />}
           initialState={tableURLState}
-          isFetching={isFetching}
           isLoading={isLoading}
           modelName="Dag"
           onStateChange={setTableURLState}
@@ -248,6 +251,6 @@ export const DagsList = () => {
           total={data.total_entries}
         />
       </Box>
-    </>
+    </DagsLayout>
   );
 };

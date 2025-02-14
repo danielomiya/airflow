@@ -6,10 +6,12 @@ import {
   BackfillService,
   ConfigService,
   ConnectionService,
+  DagReportService,
   DagRunService,
   DagService,
   DagSourceService,
   DagStatsService,
+  DagVersionService,
   DagWarningService,
   DagsService,
   DashboardService,
@@ -18,6 +20,7 @@ import {
   GridService,
   ImportErrorService,
   JobService,
+  LoginService,
   MonitorService,
   PluginService,
   PoolService,
@@ -370,6 +373,7 @@ export const prefetchUseConfigServiceGetConfigValue = (
  * @param data.limit
  * @param data.offset
  * @param data.tags
+ * @param data.tagsMatchMode
  * @param data.owners
  * @param data.dagIds
  * @param data.dagIdPattern
@@ -394,6 +398,7 @@ export const prefetchUseDagsServiceRecentDagRuns = (
     owners,
     paused,
     tags,
+    tagsMatchMode,
   }: {
     dagDisplayNamePattern?: string;
     dagIdPattern?: string;
@@ -406,6 +411,7 @@ export const prefetchUseDagsServiceRecentDagRuns = (
     owners?: string[];
     paused?: boolean;
     tags?: string[];
+    tagsMatchMode?: "any" | "all";
   } = {},
 ) =>
   queryClient.prefetchQuery({
@@ -421,6 +427,7 @@ export const prefetchUseDagsServiceRecentDagRuns = (
       owners,
       paused,
       tags,
+      tagsMatchMode,
     }),
     queryFn: () =>
       DagsService.recentDagRuns({
@@ -435,6 +442,7 @@ export const prefetchUseDagsServiceRecentDagRuns = (
         owners,
         paused,
         tags,
+        tagsMatchMode,
       }),
   });
 /**
@@ -469,6 +477,7 @@ export const prefetchUseDashboardServiceHistoricalMetrics = (
  * @param data.includeDownstream
  * @param data.root
  * @param data.externalDependencies
+ * @param data.versionNumber
  * @returns StructureDataResponse Successful Response
  * @throws ApiError
  */
@@ -480,12 +489,14 @@ export const prefetchUseStructureServiceStructureData = (
     includeDownstream,
     includeUpstream,
     root,
+    versionNumber,
   }: {
     dagId: string;
     externalDependencies?: boolean;
     includeDownstream?: boolean;
     includeUpstream?: boolean;
     root?: string;
+    versionNumber?: number;
   },
 ) =>
   queryClient.prefetchQuery({
@@ -495,6 +506,7 @@ export const prefetchUseStructureServiceStructureData = (
       includeDownstream,
       includeUpstream,
       root,
+      versionNumber,
     }),
     queryFn: () =>
       StructureService.structureData({
@@ -503,6 +515,7 @@ export const prefetchUseStructureServiceStructureData = (
         includeDownstream,
         includeUpstream,
         root,
+        versionNumber,
       }),
   });
 /**
@@ -758,6 +771,8 @@ export const prefetchUseDagRunServiceGetUpstreamAssetEvents = (
  * @param data.dagId
  * @param data.limit
  * @param data.offset
+ * @param data.runAfterGte
+ * @param data.runAfterLte
  * @param data.logicalDateGte
  * @param data.logicalDateLte
  * @param data.startDateGte
@@ -782,6 +797,8 @@ export const prefetchUseDagRunServiceGetDagRuns = (
     logicalDateLte,
     offset,
     orderBy,
+    runAfterGte,
+    runAfterLte,
     startDateGte,
     startDateLte,
     state,
@@ -796,6 +813,8 @@ export const prefetchUseDagRunServiceGetDagRuns = (
     logicalDateLte?: string;
     offset?: number;
     orderBy?: string;
+    runAfterGte?: string;
+    runAfterLte?: string;
     startDateGte?: string;
     startDateLte?: string;
     state?: string[];
@@ -813,6 +832,8 @@ export const prefetchUseDagRunServiceGetDagRuns = (
       logicalDateLte,
       offset,
       orderBy,
+      runAfterGte,
+      runAfterLte,
       startDateGte,
       startDateLte,
       state,
@@ -829,6 +850,8 @@ export const prefetchUseDagRunServiceGetDagRuns = (
         logicalDateLte,
         offset,
         orderBy,
+        runAfterGte,
+        runAfterLte,
         startDateGte,
         startDateLte,
         state,
@@ -883,6 +906,26 @@ export const prefetchUseDagStatsServiceGetDagStats = (
     queryFn: () => DagStatsService.getDagStats({ dagIds }),
   });
 /**
+ * Get Dag Reports
+ * Get DAG report.
+ * @param data The data for the request.
+ * @param data.subdir
+ * @returns unknown Successful Response
+ * @throws ApiError
+ */
+export const prefetchUseDagReportServiceGetDagReports = (
+  queryClient: QueryClient,
+  {
+    subdir,
+  }: {
+    subdir: string;
+  },
+) =>
+  queryClient.prefetchQuery({
+    queryKey: Common.UseDagReportServiceGetDagReportsKeyFn({ subdir }),
+    queryFn: () => DagReportService.getDagReports({ subdir }),
+  });
+/**
  * List Dag Warnings
  * Get a list of DAG warnings.
  * @param data The data for the request.
@@ -921,12 +964,18 @@ export const prefetchUseDagWarningServiceListDagWarnings = (
  * @param data.limit
  * @param data.offset
  * @param data.tags
+ * @param data.tagsMatchMode
  * @param data.owners
  * @param data.dagIdPattern
  * @param data.dagDisplayNamePattern
  * @param data.onlyActive
  * @param data.paused
  * @param data.lastDagRunState
+ * @param data.dagRunStartDateGte
+ * @param data.dagRunStartDateLte
+ * @param data.dagRunEndDateGte
+ * @param data.dagRunEndDateLte
+ * @param data.dagRunState
  * @param data.orderBy
  * @returns DAGCollectionResponse Successful Response
  * @throws ApiError
@@ -936,6 +985,11 @@ export const prefetchUseDagServiceGetDags = (
   {
     dagDisplayNamePattern,
     dagIdPattern,
+    dagRunEndDateGte,
+    dagRunEndDateLte,
+    dagRunStartDateGte,
+    dagRunStartDateLte,
+    dagRunState,
     lastDagRunState,
     limit,
     offset,
@@ -944,9 +998,15 @@ export const prefetchUseDagServiceGetDags = (
     owners,
     paused,
     tags,
+    tagsMatchMode,
   }: {
     dagDisplayNamePattern?: string;
     dagIdPattern?: string;
+    dagRunEndDateGte?: string;
+    dagRunEndDateLte?: string;
+    dagRunStartDateGte?: string;
+    dagRunStartDateLte?: string;
+    dagRunState?: string[];
     lastDagRunState?: DagRunState;
     limit?: number;
     offset?: number;
@@ -955,12 +1015,18 @@ export const prefetchUseDagServiceGetDags = (
     owners?: string[];
     paused?: boolean;
     tags?: string[];
+    tagsMatchMode?: "any" | "all";
   } = {},
 ) =>
   queryClient.prefetchQuery({
     queryKey: Common.UseDagServiceGetDagsKeyFn({
       dagDisplayNamePattern,
       dagIdPattern,
+      dagRunEndDateGte,
+      dagRunEndDateLte,
+      dagRunStartDateGte,
+      dagRunStartDateLte,
+      dagRunState,
       lastDagRunState,
       limit,
       offset,
@@ -969,11 +1035,17 @@ export const prefetchUseDagServiceGetDags = (
       owners,
       paused,
       tags,
+      tagsMatchMode,
     }),
     queryFn: () =>
       DagService.getDags({
         dagDisplayNamePattern,
         dagIdPattern,
+        dagRunEndDateGte,
+        dagRunEndDateLte,
+        dagRunStartDateGte,
+        dagRunStartDateLte,
+        dagRunState,
         lastDagRunState,
         limit,
         offset,
@@ -982,6 +1054,7 @@ export const prefetchUseDagServiceGetDags = (
         owners,
         paused,
         tags,
+        tagsMatchMode,
       }),
   });
 /**
@@ -1169,6 +1242,7 @@ export const prefetchUseEventLogServiceGetEventLogs = (
  * @param data.dagId
  * @param data.dagRunId
  * @param data.taskId
+ * @param data.mapIndex
  * @returns ExtraLinksResponse Successful Response
  * @throws ApiError
  */
@@ -1177,16 +1251,18 @@ export const prefetchUseExtraLinksServiceGetExtraLinks = (
   {
     dagId,
     dagRunId,
+    mapIndex,
     taskId,
   }: {
     dagId: string;
     dagRunId: string;
+    mapIndex?: number;
     taskId: string;
   },
 ) =>
   queryClient.prefetchQuery({
-    queryKey: Common.UseExtraLinksServiceGetExtraLinksKeyFn({ dagId, dagRunId, taskId }),
-    queryFn: () => ExtraLinksService.getExtraLinks({ dagId, dagRunId, taskId }),
+    queryKey: Common.UseExtraLinksServiceGetExtraLinksKeyFn({ dagId, dagRunId, mapIndex, taskId }),
+    queryFn: () => ExtraLinksService.getExtraLinks({ dagId, dagRunId, mapIndex, taskId }),
   });
 /**
  * Get Extra Links
@@ -1195,6 +1271,7 @@ export const prefetchUseExtraLinksServiceGetExtraLinks = (
  * @param data.dagId
  * @param data.dagRunId
  * @param data.taskId
+ * @param data.mapIndex
  * @returns ExtraLinksResponse Successful Response
  * @throws ApiError
  */
@@ -1203,16 +1280,18 @@ export const prefetchUseTaskInstanceServiceGetExtraLinks = (
   {
     dagId,
     dagRunId,
+    mapIndex,
     taskId,
   }: {
     dagId: string;
     dagRunId: string;
+    mapIndex?: number;
     taskId: string;
   },
 ) =>
   queryClient.prefetchQuery({
-    queryKey: Common.UseTaskInstanceServiceGetExtraLinksKeyFn({ dagId, dagRunId, taskId }),
-    queryFn: () => TaskInstanceService.getExtraLinks({ dagId, dagRunId, taskId }),
+    queryKey: Common.UseTaskInstanceServiceGetExtraLinksKeyFn({ dagId, dagRunId, mapIndex, taskId }),
+    queryFn: () => TaskInstanceService.getExtraLinks({ dagId, dagRunId, mapIndex, taskId }),
   });
 /**
  * Get Task Instance
@@ -1261,6 +1340,7 @@ export const prefetchUseTaskInstanceServiceGetTaskInstance = (
  * @param data.pool
  * @param data.queue
  * @param data.executor
+ * @param data.versionNumber
  * @param data.limit
  * @param data.offset
  * @param data.orderBy
@@ -1290,6 +1370,7 @@ export const prefetchUseTaskInstanceServiceGetMappedTaskInstances = (
     taskId,
     updatedAtGte,
     updatedAtLte,
+    versionNumber,
   }: {
     dagId: string;
     dagRunId: string;
@@ -1311,6 +1392,7 @@ export const prefetchUseTaskInstanceServiceGetMappedTaskInstances = (
     taskId: string;
     updatedAtGte?: string;
     updatedAtLte?: string;
+    versionNumber?: number[];
   },
 ) =>
   queryClient.prefetchQuery({
@@ -1335,6 +1417,7 @@ export const prefetchUseTaskInstanceServiceGetMappedTaskInstances = (
       taskId,
       updatedAtGte,
       updatedAtLte,
+      versionNumber,
     }),
     queryFn: () =>
       TaskInstanceService.getMappedTaskInstances({
@@ -1358,6 +1441,7 @@ export const prefetchUseTaskInstanceServiceGetMappedTaskInstances = (
         taskId,
         updatedAtGte,
         updatedAtLte,
+        versionNumber,
       }),
   });
 /**
@@ -1544,6 +1628,7 @@ export const prefetchUseTaskInstanceServiceGetMappedTaskInstance = (
  * @param data.pool
  * @param data.queue
  * @param data.executor
+ * @param data.versionNumber
  * @param data.limit
  * @param data.offset
  * @param data.orderBy
@@ -1574,6 +1659,7 @@ export const prefetchUseTaskInstanceServiceGetTaskInstances = (
     taskId,
     updatedAtGte,
     updatedAtLte,
+    versionNumber,
   }: {
     dagId: string;
     dagRunId: string;
@@ -1596,6 +1682,7 @@ export const prefetchUseTaskInstanceServiceGetTaskInstances = (
     taskId?: string;
     updatedAtGte?: string;
     updatedAtLte?: string;
+    versionNumber?: number[];
   },
 ) =>
   queryClient.prefetchQuery({
@@ -1621,6 +1708,7 @@ export const prefetchUseTaskInstanceServiceGetTaskInstances = (
       taskId,
       updatedAtGte,
       updatedAtLte,
+      versionNumber,
     }),
     queryFn: () =>
       TaskInstanceService.getTaskInstances({
@@ -1645,6 +1733,7 @@ export const prefetchUseTaskInstanceServiceGetTaskInstances = (
         taskId,
         updatedAtGte,
         updatedAtLte,
+        versionNumber,
       }),
   });
 /**
@@ -1965,6 +2054,7 @@ export const prefetchUsePoolServiceGetPool = (
  * @param data.limit
  * @param data.offset
  * @param data.orderBy
+ * @param data.poolNamePattern
  * @returns PoolCollectionResponse Successful Response
  * @throws ApiError
  */
@@ -1974,15 +2064,17 @@ export const prefetchUsePoolServiceGetPools = (
     limit,
     offset,
     orderBy,
+    poolNamePattern,
   }: {
     limit?: number;
     offset?: number;
     orderBy?: string;
+    poolNamePattern?: string;
   } = {},
 ) =>
   queryClient.prefetchQuery({
-    queryKey: Common.UsePoolServiceGetPoolsKeyFn({ limit, offset, orderBy }),
-    queryFn: () => PoolService.getPools({ limit, offset, orderBy }),
+    queryKey: Common.UsePoolServiceGetPoolsKeyFn({ limit, offset, orderBy, poolNamePattern }),
+    queryFn: () => PoolService.getPools({ limit, offset, orderBy, poolNamePattern }),
   });
 /**
  * Get Providers
@@ -2067,7 +2159,7 @@ export const prefetchUseXcomServiceGetXcomEntry = (
  * @param data.mapIndex
  * @param data.limit
  * @param data.offset
- * @returns XComCollection Successful Response
+ * @returns XComCollectionResponse Successful Response
  * @throws ApiError
  */
 export const prefetchUseXcomServiceGetXcomEntries = (
@@ -2198,6 +2290,63 @@ export const prefetchUseVariableServiceGetVariables = (
     queryFn: () => VariableService.getVariables({ limit, offset, orderBy, variableKeyPattern }),
   });
 /**
+ * Get Dag Versions
+ * Get all DAG Versions.
+ *
+ * This endpoint allows specifying `~` as the dag_id to retrieve DAG Versions for all DAGs.
+ * @param data The data for the request.
+ * @param data.dagId
+ * @param data.limit
+ * @param data.offset
+ * @param data.versionNumber
+ * @param data.bundleName
+ * @param data.bundleVersion
+ * @param data.orderBy
+ * @returns DAGVersionCollectionResponse Successful Response
+ * @throws ApiError
+ */
+export const prefetchUseDagVersionServiceGetDagVersions = (
+  queryClient: QueryClient,
+  {
+    bundleName,
+    bundleVersion,
+    dagId,
+    limit,
+    offset,
+    orderBy,
+    versionNumber,
+  }: {
+    bundleName?: string;
+    bundleVersion?: string;
+    dagId: string;
+    limit?: number;
+    offset?: number;
+    orderBy?: string;
+    versionNumber?: number;
+  },
+) =>
+  queryClient.prefetchQuery({
+    queryKey: Common.UseDagVersionServiceGetDagVersionsKeyFn({
+      bundleName,
+      bundleVersion,
+      dagId,
+      limit,
+      offset,
+      orderBy,
+      versionNumber,
+    }),
+    queryFn: () =>
+      DagVersionService.getDagVersions({
+        bundleName,
+        bundleVersion,
+        dagId,
+        limit,
+        offset,
+        orderBy,
+        versionNumber,
+      }),
+  });
+/**
  * Get Health
  * @returns HealthInfoResponse Successful Response
  * @throws ApiError
@@ -2217,4 +2366,24 @@ export const prefetchUseVersionServiceGetVersion = (queryClient: QueryClient) =>
   queryClient.prefetchQuery({
     queryKey: Common.UseVersionServiceGetVersionKeyFn(),
     queryFn: () => VersionService.getVersion(),
+  });
+/**
+ * Login
+ * Redirect to the login URL depending on the AuthManager configured.
+ * @param data The data for the request.
+ * @param data.next
+ * @returns unknown Successful Response
+ * @throws ApiError
+ */
+export const prefetchUseLoginServiceLogin = (
+  queryClient: QueryClient,
+  {
+    next,
+  }: {
+    next?: string;
+  } = {},
+) =>
+  queryClient.prefetchQuery({
+    queryKey: Common.UseLoginServiceLoginKeyFn({ next }),
+    queryFn: () => LoginService.login({ next }),
   });
