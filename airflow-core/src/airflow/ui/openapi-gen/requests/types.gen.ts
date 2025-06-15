@@ -497,6 +497,7 @@ export type DAGDetailsResponse = {
   relative_fileloc: string | null;
   fileloc: string;
   description: string | null;
+  deadline: Array<DeadlineAlertResponse> | null;
   timetable_summary: string | null;
   timetable_description: string | null;
   tags: Array<DagTagResponse>;
@@ -568,6 +569,7 @@ export type DAGResponse = {
   relative_fileloc: string | null;
   fileloc: string;
   description: string | null;
+  deadline: Array<DeadlineAlertResponse> | null;
   timetable_summary: string | null;
   timetable_description: string | null;
   tags: Array<DagTagResponse>;
@@ -626,6 +628,7 @@ export type DAGRunResponse = {
   queued_at: string | null;
   start_date: string | null;
   end_date: string | null;
+  duration: number | null;
   data_interval_start: string | null;
   data_interval_end: string | null;
   run_after: string;
@@ -816,6 +819,18 @@ export type DagVersionResponse = {
  * in the DagWarning model.
  */
 export type DagWarningType = "asset conflict" | "non-existent pool";
+
+/**
+ * Deadline alert serializer for responses.
+ */
+export type DeadlineAlertResponse = {
+  reference: string;
+  interval: string;
+  callback: string;
+  callback_kwargs?: {
+    [key: string]: unknown;
+  } | null;
+};
 
 /**
  * Backfill collection serializer for responses in dry-run mode.
@@ -1653,6 +1668,7 @@ export type DAGWithLatestDagRunsResponse = {
   relative_fileloc: string | null;
   fileloc: string;
   description: string | null;
+  deadline: Array<DeadlineAlertResponse> | null;
   timetable_summary: string | null;
   timetable_description: string | null;
   tags: Array<DagTagResponse>;
@@ -2285,7 +2301,7 @@ export type GetDagTagsData = {
 
 export type GetDagTagsResponse = DAGTagCollectionResponse;
 
-export type RecentDagRunsData = {
+export type GetDagsUiData = {
   /**
    * SQL LIKE expression — use `%` / `_` wildcards (e.g. `%customer_%`). Regular expressions are **not** supported.
    */
@@ -2300,13 +2316,14 @@ export type RecentDagRunsData = {
   lastDagRunState?: DagRunState | null;
   limit?: number;
   offset?: number;
+  orderBy?: string;
   owners?: Array<string>;
   paused?: boolean | null;
   tags?: Array<string>;
   tagsMatchMode?: "any" | "all" | null;
 };
 
-export type RecentDagRunsResponse = DAGWithLatestDagRunsCollectionResponse;
+export type GetDagsUiResponse = DAGWithLatestDagRunsCollectionResponse;
 
 export type GetEventLogData = {
   eventLogId: number;
@@ -4266,9 +4283,9 @@ export type $OpenApiTs = {
       };
     };
   };
-  "/ui/dags/recent_dag_runs": {
+  "/ui/dags": {
     get: {
-      req: RecentDagRunsData;
+      req: GetDagsUiData;
       res: {
         /**
          * Successful Response
