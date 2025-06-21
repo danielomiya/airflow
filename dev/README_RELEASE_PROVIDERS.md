@@ -508,7 +508,13 @@ The command does the following:
 3. Triggers S3 to GitHub Sync
 
 ```shell script
-  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto>
+  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> all-providers
+```
+
+Or if you just want to publish a few selected providers, you can run:
+
+```shell script
+  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> PACKAGE1 PACKAGE2 ..
 ```
 
 The `--ref` parameter should be the tag of the release candidate you are publishing.
@@ -752,7 +758,7 @@ may help with verifying installation of the packages.
 
 ```shell script
 # Copy the list of packages (pypi urls) into `packages.txt` then run:
-python check_files.py providers -p {PATH_TO_SVN}
+uv run check_files.py providers -p {PATH_TO_SVN}
 ```
 
 After the above script completes you can build `Dockerfile.pmc` to trigger an installation of each provider
@@ -1252,8 +1258,15 @@ The command does the following:
 3. Triggers S3 to GitHub Sync
 
 ```shell script
-  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto>
+  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> all-providers
 ```
+
+Or if you just want to publish a few selected providers, you can run:
+
+```shell script
+  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> PACKAGE1 PACKAGE2 ..
+```
+
 
 The `--ref` parameter should be the tag of the final candidate you are publishing.
 
